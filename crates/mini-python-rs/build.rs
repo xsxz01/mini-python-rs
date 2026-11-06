@@ -1,9 +1,8 @@
 use std::path::PathBuf;
 
 fn main() {
-    let manifest = PathBuf::from(
-        std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"),
-    );
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let upstream = manifest.join("../../thirdparty/3.14.0/src");
     let root = if upstream.is_dir() {
         upstream
