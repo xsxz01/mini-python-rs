@@ -1,0 +1,12 @@
+/target/
+**/target/
+.env
+.env.*
+!.env.example
+**/.cargo/credentials
+**/.cargo/credentials.toml
+*.pem
+*.key
+*credentials*
+thirdparty/3.14.0/lib/minipy.lib
+thirdparty/3.14.0/src/minipy.exe

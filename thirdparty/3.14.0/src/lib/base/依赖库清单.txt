@@ -1,0 +1,22 @@
+# 核心依赖库（C库，C++直接调用）
+libffi        -> ctypes完整实现
+zlib          -> zlib zipfile gzip
+sqlite3       -> sqlite3
+openssl       -> ssl hashlib
+libmpdec      -> decimal
+libbz2        -> bz2
+liblzma(xz)   -> lzma
+libuuid       -> uuid
+expat         -> xml.expat
+readline      -> readline
+ncurses       -> curses
+gdbm          -> dbm
+
+# 系统自带API（Windows，无需额外库）
+winsock2      -> socket
+win32 api     -> os shutil subprocess threading signal winreg mmap
+c++17 std::filesystem -> pathlib
+c++ std::chrono -> time calendar
+
+# 纯手写、仅依赖C++标准库
+bisect heapq itertools statistics enum weakref collections argparse logging inspect traceback pdb csv configparser

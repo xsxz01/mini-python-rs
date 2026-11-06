@@ -1,0 +1,17 @@
+[package]
+name = "mini-python-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.85"
+description = "Embed the MiniPython interpreter and register Rust native modules"
+readme = "README.md"
+repository = "https://github.com/xsxz01/mini-python-rs"
+build = "build.rs"
+include = ["Cargo.toml", "build.rs", "src/**", "vendor/**", "README.md", "README.en.md", "LICENSE"]
+
+[lib]
+name = "mini_python_rs"
+
+[build-dependencies]
+cc = "1"

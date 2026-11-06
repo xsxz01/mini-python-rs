@@ -1,0 +1,8 @@
+[package]
+name = "mini-python-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mini-python-rs = { path = "../mini-python-rs" }
