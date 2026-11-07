@@ -25,7 +25,7 @@
 
 ```toml
 [dependencies]
-mini-python-rs = "0.1.0"
+mini-python-rs = "0.1.1"
 ```
 
 ## Execute source

@@ -6,7 +6,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
 
 namespace minipy {
 
@@ -78,6 +83,10 @@ static minipy::value fnLen(minipy::cffi& args){
     }
     if (value.type == "range" && value.ptr){
         return args.mkint(static_cast<minipy::range_t*>(value.ptr)->count());
+    }
+    if (value.type == "bytes"){
+        return args.mkint(static_cast<long long>(
+            static_cast<std::string*>(value.ptr)->size()));
     }
 
 // minipy
@@ -1607,6 +1616,500 @@ static minipy::value fnAscii(minipy::cffi& args){
     return args.mkstr(vm.toString(args.arg(0)));
 }
 
+// ============================================================
+// open() / 文件对象 (纯 std::fstream, 无平台相关头)
+// ============================================================
+
+struct FileState{
+    std::fstream stream;
+    std::string path;
+    std::string mode;
+    bool binary = false;
+    bool isopen = true;
+};
+
+static FileState* fileStateOf(minipy::cffi& args){
+    minipy::value self = args.self();
+    if (self.type != "native_object" || !self.ptr) return nullptr;
+    auto* inst = static_cast<minipy::ffi_instance*>(self.ptr);
+    return static_cast<FileState*>(inst->handle);
+}
+
+static void requireOpenFile(minipy::cffi& args, FileState* st){
+    if (!st){
+        args.vm->raiseError("ValueError", "I/O operation on uninitialized file");
+        return;
+    }
+    if (!st->isopen){
+        args.vm->raiseError("ValueError", "I/O operation on closed file");
+    }
+}
+
+// fn 文件 __enter__
+static minipy::value fnFileEnter(minipy::cffi& args){
+    return args.self();
+}
+
+// fn 文件 __exit__ (返回 False, 让异常继续传播)
+static minipy::value fnFileExit(minipy::cffi& args){
+    (void)args;
+    FileState* st = fileStateOf(args);
+    if (st && st->isopen) st->stream.close();
+    if (st) st->isopen = false;
+    args.setattr("closed", args.mkbool(true));
+    return args.mkbool(false);
+}
+
+// fn 文件 close
+static minipy::value fnFileClose(minipy::cffi& args){
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (args.vm->hasError()) return args.none();
+    st->stream.close();
+    st->isopen = false;
+    args.setattr("closed", args.mkbool(true));
+    return args.none();
+}
+
+// fn 文件 flush
+static minipy::value fnFileFlush(minipy::cffi& args){
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (args.vm->hasError()) return args.none();
+    st->stream.flush();
+    return args.none();
+}
+
+// fn 文件 read(size=-1)
+static minipy::value fnFileRead(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (vm.hasError()) return args.none();
+    long long n = -1;
+    if (args.argc() >= 1 && args.arg(0).type != "none"){
+        n = args.arg_int(0);
+        if (n < -1){
+            vm.raiseError("ValueError", "read() length must be non-negative");
+            return args.none();
+        }
+    }
+    std::string out;
+    if (n < 0){
+        std::ostringstream ss;
+        ss << st->stream.rdbuf();
+        out = ss.str();
+    } else {
+        out.resize(static_cast<size_t>(n));
+        st->stream.read(&out[0], static_cast<std::streamsize>(n));
+        out.resize(static_cast<size_t>(st->stream.gcount() > 0 ? st->stream.gcount() : 0));
+    }
+    return args.mkstr(out);
+}
+
+// fn 文件 readline()
+static minipy::value fnFileReadline(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (vm.hasError()) return args.none();
+    std::string line;
+    if (!std::getline(st->stream, line)) return args.mkstr("");
+    if (!st->stream.eof()) line += '\n';
+    return args.mkstr(line);
+}
+
+// fn 文件 readlines()
+static minipy::value fnFileReadlines(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (vm.hasError()) return args.none();
+    std::vector<minipy::value> lines;
+    std::string line;
+    while (std::getline(st->stream, line)){
+        if (!st->stream.eof()) line += '\n';
+        lines.push_back(args.mkstr(line));
+        line.clear();
+    }
+    return args.mklist(lines);
+}
+
+// fn 文件 write(s)
+static minipy::value fnFileWrite(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (vm.hasError()) return args.none();
+    std::string text = args.arg_str(0);
+    st->stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!st->stream.good()){
+        st->stream.close();
+        st->isopen = false;
+        vm.raiseError("OSError", "[Errno 28] No space left on device: '" + st->path + "'");
+        return args.none();
+    }
+    return args.mkint(static_cast<long long>(text.size()));
+}
+
+// fn 文件 writelines(list)
+static minipy::value fnFileWritelines(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (vm.hasError()) return args.none();
+    std::vector<minipy::value> items;
+    if (args.argc() >= 1) vm.materializeIterable(args.arg(0), items);
+    long long total = 0;
+    for (const auto& item : items){
+        std::string text = vm.toString(item);
+        st->stream.write(text.data(), static_cast<std::streamsize>(text.size()));
+        total += static_cast<long long>(text.size());
+    }
+    return args.mkint(total);
+}
+
+// fn 文件 tell()
+static minipy::value fnFileTell(minipy::cffi& args){
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (args.vm->hasError()) return args.none();
+    return args.mkint(static_cast<long long>(st->stream.tellg()));
+}
+
+// fn 文件 seek(offset, whence=0)
+static minipy::value fnFileSeek(minipy::cffi& args){
+    FileState* st = fileStateOf(args);
+    requireOpenFile(args, st);
+    if (args.vm->hasError()) return args.none();
+    long long offset = args.arg_int(0);
+    long long whence = args.argc() >= 2 ? args.arg_int(1) : 0;
+    std::ios::seekdir dir = std::ios::beg;
+    if (whence == 1) dir = std::ios::cur;
+    else if (whence == 2) dir = std::ios::end;
+    else if (whence != 0){
+        args.vm->raiseError("ValueError", "invalid whence (" + std::to_string(whence) +
+                                         ", should be 0, 1 or 2)");
+        return args.none();
+    }
+    st->stream.clear();
+    st->stream.seekg(offset, dir);
+    return args.mkint(static_cast<long long>(st->stream.tellg()));
+}
+
+// fn open(file, mode='r', encoding=None, ...)
+static minipy::value fnOpen(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() < 1){
+        vm.raiseError("TypeError", "open() missing required argument 'file' (pos 1)");
+        return args.none();
+    }
+    std::string path = args.arg_str(0);
+    std::string mode = "r";
+    if (args.has_kwarg("mode") && args.kwarg("mode").type != "none") mode = args.kwarg_str("mode", "r");
+    else if (args.argc() >= 2) mode = args.arg_str(1);
+    if (args.has_kwarg("encoding") && args.kwarg("encoding").type != "none"){
+        std::string enc = args.kwarg_str("encoding", "utf-8");
+        std::string lower = enc;
+        for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (lower != "utf-8" && lower != "utf8" && lower != "utf_8" && lower != "ascii"){
+            vm.raiseError("ValueError", "unknown encoding: " + enc + " (only utf-8 is supported)");
+            return args.none();
+        }
+    }
+
+    bool readFlag = false, writeFlag = false, appendFlag = false, plusFlag = false;
+    bool truncFlag = false;
+    for (char ch : mode){
+        switch (ch){
+            case 'r': readFlag = true; break;
+            case 'w': writeFlag = true; truncFlag = true; break;
+            case 'a': appendFlag = true; writeFlag = true; break;
+            case 'x': writeFlag = true; truncFlag = true; break;
+            case '+': plusFlag = true; break;
+            case 'b': case 't': break;
+            default:
+                vm.raiseError("ValueError", "invalid mode: '" + mode + "'");
+                return args.none();
+        }
+    }
+    if (!readFlag && !writeFlag && !plusFlag){ readFlag = true; }
+
+    bool exclusive = mode.find('x') != std::string::npos;
+    if (exclusive){
+        std::ifstream probe(path, std::ios::binary);
+        if (probe.good()){
+            probe.close();
+            vm.raiseError("FileExistsError", "[Errno 17] File exists: '" + path + "'");
+            return args.none();
+        }
+    }
+
+    std::ios::openmode flags = std::ios::binary;
+    if (readFlag || plusFlag) flags |= std::ios::in;
+    if (writeFlag) flags |= std::ios::out;
+    if (truncFlag) flags |= std::ios::trunc;
+    if (appendFlag) flags |= std::ios::app;
+
+    auto* st = new FileState();
+    st->path = path;
+    st->mode = mode;
+    st->binary = mode.find('b') != std::string::npos;
+    st->stream.open(path, flags);
+    if (!st->stream.is_open()){
+        delete st;
+        vm.raiseError("FileNotFoundError", "[Errno 2] No such file or directory: '" + path + "'");
+        return args.none();
+    }
+
+    auto it = args.library->classes.find("file");
+    if (it == args.library->classes.end() || !args.library){
+        vm.raiseError("RuntimeError", "internal error: file class not registered");
+        return args.none();
+    }
+    minipy::value obj = vm.makeNativeObject(args.library, &it->second, st);
+    args.setattr(obj, "closed", args.mkbool(false));
+    args.setattr(obj, "name", args.mkstr(path));
+    args.setattr(obj, "mode", args.mkstr(mode));
+    return obj;
+}
+
+// ============================================================
+// bytes / bytearray / memoryview
+// ============================================================
+
+// bytes value 底层复用 heap 的 vk_str (std::string) 存放原始字节串, 仅改 type 标记
+static minipy::value mkBytesValue(minipy::vm& vm, const std::string& raw){
+    minipy::value v = vm.makeString(raw);
+    v.type = "bytes";
+    return v;
+}
+
+static std::string bytesSourceOf(minipy::vm& vm, const minipy::value& v, bool& ok){
+    ok = true;
+    if (v.type == "bytes") return *static_cast<std::string*>(v.ptr);
+    if (v.type == "str") return vm.toString(v);
+    if (v.type == "list" || v.type == "tuple"){
+        std::string raw;
+        auto* items = static_cast<std::vector<minipy::value>*>(v.ptr);
+        for (const auto& item : *items){
+            long long b = vm.toInt(item) & 0xFF;
+            raw.push_back(static_cast<char>(b));
+        }
+        return raw;
+    }
+    ok = false;
+    return "";
+}
+
+static minipy::value fnBytes(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() == 0) return mkBytesValue(vm, "");
+    minipy::value v = args.arg(0);
+    if (v.type == "int"){
+        long long n = args.arg_int(0);
+        if (n < 0){
+            vm.raiseError("ValueError", "negative count");
+            return args.none();
+        }
+        return mkBytesValue(vm, std::string(static_cast<size_t>(n), '\0'));
+    }
+    bool ok = false;
+    std::string raw = bytesSourceOf(vm, v, ok);
+    if (!ok){
+        vm.raiseError("TypeError", "cannot convert '" + vm.pythonTypeName(v) + "' object to bytes");
+        return args.none();
+    }
+    return mkBytesValue(vm, raw);
+}
+
+static minipy::value fnBytearray(minipy::cffi& args){
+    return fnBytes(args);
+}
+
+static minipy::value fnMemoryviewConstructor(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() < 1){
+        vm.raiseError("TypeError", "memoryview() missing required argument");
+        return args.none();
+    }
+    bool ok = false;
+    std::string raw = bytesSourceOf(vm, args.arg(0), ok);
+    if (!ok){
+        vm.raiseError("TypeError", "memoryview: a bytes-like object is required, not '" +
+                                     vm.pythonTypeName(args.arg(0)) + "'");
+        return args.none();
+    }
+    minipy::value obj = args.mkobject(new std::string(raw));
+    args.setattr(obj, "obj", args.arg(0));
+    return obj;
+}
+
+static minipy::value fnMemoryviewTobytes(minipy::cffi& args){
+    minipy::value self = args.self();
+    if (self.type == "native_object" && self.ptr){
+        auto* inst = static_cast<minipy::ffi_instance*>(self.ptr);
+        auto* raw = static_cast<std::string*>(inst->handle);
+        if (raw) return mkBytesValue(*args.vm, *raw);
+    }
+    return args.none();
+}
+
+// ============================================================
+// set / frozenset (以 dict (key -> True) 形式承载, 支持 in/len/迭代)
+// ============================================================
+
+static minipy::value setFromIterable(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    std::vector<minipy::value> items;
+    if (args.argc() >= 1 && args.arg(0).type != "none"){
+        vm.materializeIterable(args.arg(0), items);
+        if (vm.hasError()) return args.none();
+    }
+    std::vector<std::pair<minipy::value, minipy::value>> kv;
+    for (const auto& item : items) kv.push_back({item, args.mkbool(true)});
+    return args.mkdict(kv);
+}
+
+static minipy::value fnSet(minipy::cffi& args){
+    return setFromIterable(args);
+}
+
+static minipy::value fnFrozenset(minipy::cffi& args){
+    return setFromIterable(args);
+}
+
+// ============================================================
+// pow / slice / complex / compile / breakpoint / help / globals / locals / __import__
+// ============================================================
+
+static minipy::value fnPow(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() < 2){
+        vm.raiseError("TypeError", "pow() missing required argument (expected 2-3, got " +
+                                     std::to_string(args.argc()) + ")");
+        return args.none();
+    }
+    minipy::value base = args.arg(0), exp = args.arg(1);
+    if (args.argc() >= 3 && args.arg(2).type != "none"){
+        long long b = vm.toInt(base), e = vm.toInt(exp), m = vm.toInt(args.arg(2));
+        if (m == 0){
+            vm.raiseError("ValueError", "pow() 3rd argument cannot be 0");
+            return args.none();
+        }
+        long long result = 1;
+        b %= m;
+        bool neg = m < 0;
+        unsigned long long mm = neg ? static_cast<unsigned long long>(-(m + 1)) + 1ULL
+                                    : static_cast<unsigned long long>(m);
+        unsigned long long ee = e < 0 ? static_cast<unsigned long long>(-(e + 1)) + 1ULL
+                                      : static_cast<unsigned long long>(e);
+        while (ee){
+            if (ee & 1ULL) result = static_cast<long long>(
+                (static_cast<unsigned long long>(result) * static_cast<unsigned long long>(b)) % mm);
+            b = static_cast<long long>(
+                (static_cast<unsigned long long>(b) * static_cast<unsigned long long>(b)) % mm);
+            ee >>= 1;
+        }
+        return args.mkint(result);
+    }
+    if (base.type == "float" || exp.type == "float"){
+        return args.mkfloat(std::pow(vm.toFloat(base), vm.toFloat(exp)));
+    }
+    long long b = vm.toInt(base), e = vm.toInt(exp);
+    if (e >= 0){
+        long long result = 1;
+        while (e){
+            if (e & 1) result *= b;
+            b *= b;
+            e >>= 1;
+        }
+        return args.mkint(result);
+    }
+    return args.mkfloat(std::pow(static_cast<double>(vm.toInt(base)),
+                                 static_cast<double>(vm.toInt(exp))));
+}
+
+static minipy::value fnSliceConstructor(minipy::cffi& args){
+    minipy::value obj = args.mkobject(nullptr);
+    args.setattr(obj, "start", args.argc() >= 1 ? args.arg(0) : args.none());
+    args.setattr(obj, "stop", args.argc() >= 2 ? args.arg(1) : args.none());
+    args.setattr(obj, "step", args.argc() >= 3 ? args.arg(2) : args.none());
+    return obj;
+}
+
+static minipy::value fnComplexConstructor(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    minipy::value obj = args.mkobject(nullptr);
+    double real = args.argc() >= 1 ? args.arg_float(0) : 0.0;
+    double imag = args.argc() >= 2 ? args.arg_float(1) : 0.0;
+    args.setattr(obj, "real", args.mkfloat(real));
+    args.setattr(obj, "imag", args.mkfloat(imag));
+    (void)vm;
+    return obj;
+}
+
+static minipy::value fnCompile(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() < 1){
+        vm.raiseError("TypeError", "compile() missing required argument 'source'");
+        return args.none();
+    }
+    if (args.argc() >= 3){
+        std::string mode = args.arg_str(2);
+        if (mode != "exec" && mode != "eval" && mode != "single"){
+            vm.raiseError("ValueError", "compile() mode must be 'exec', 'eval' or 'single'");
+            return args.none();
+        }
+    }
+    return args.mkstr(args.arg_str(0));
+}
+
+static minipy::value fnBreakpoint(minipy::cffi& args){
+    (void)args;
+    return args.none();
+}
+
+static minipy::value fnHelp(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() == 0){
+        std::cout << "Welcome to MiniPython! This is the interactive help utility.\n"
+                     "help(obj) prints information about obj.\n";
+    } else {
+        std::cout << "No documentation available for '" +
+                     vm.pythonTypeName(args.arg(0)) + "' objects.\n";
+    }
+    return args.none();
+}
+
+static minipy::value scopeSnapshot(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    std::vector<std::string> names = vm.collectScopeNames();
+    std::vector<std::pair<minipy::value, minipy::value>> kv;
+    for (const auto& name : names){
+        minipy::value v = vm.findVariable(name);
+        kv.push_back({args.mkstr(name), v});
+    }
+    return args.mkdict(kv);
+}
+
+static minipy::value fnGlobals(minipy::cffi& args){
+    return scopeSnapshot(args);
+}
+
+static minipy::value fnLocals(minipy::cffi& args){
+    return scopeSnapshot(args);
+}
+
+static minipy::value fnImport(minipy::cffi& args){
+    minipy::vm& vm = *args.vm;
+    if (args.argc() >= 1){
+        vm.raiseError("ImportError", "__import__('" + args.arg_str(0) +
+                                       "') is not supported; use the import statement");
+    }
+    return args.none();
+}
+
 // cffi 内置 lib
 // cffi builtins lib
 // cffi ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠭ᠎ᠠ lib
@@ -1641,6 +2144,33 @@ minipy::ffilib cffi_builtins_lib(){
     staticmethodClass.methods = {
         {"__get__", (void*)fnStaticmethodGet},
     };
+    minipy::ffi_class fileClass;
+    fileClass.name = "file";
+    fileClass.methods = {
+        {"__enter__", (void*)fnFileEnter},
+        {"__exit__", (void*)fnFileExit},
+        {"read", (void*)fnFileRead},
+        {"readline", (void*)fnFileReadline},
+        {"readlines", (void*)fnFileReadlines},
+        {"write", (void*)fnFileWrite},
+        {"writelines", (void*)fnFileWritelines},
+        {"close", (void*)fnFileClose},
+        {"flush", (void*)fnFileFlush},
+        {"tell", (void*)fnFileTell},
+        {"seek", (void*)fnFileSeek},
+    };
+    minipy::ffi_class memoryviewClass;
+    memoryviewClass.name = "memoryview";
+    memoryviewClass.constructor = (void*)fnMemoryviewConstructor;
+    memoryviewClass.methods = {
+        {"tobytes", (void*)fnMemoryviewTobytes},
+    };
+    minipy::ffi_class sliceClass;
+    sliceClass.name = "slice";
+    sliceClass.constructor = (void*)fnSliceConstructor;
+    minipy::ffi_class complexClass;
+    complexClass.name = "complex";
+    complexClass.constructor = (void*)fnComplexConstructor;
     return minipy::cffi_lib(
         "builtins",
         {
@@ -1693,6 +2223,21 @@ minipy::ffilib cffi_builtins_lib(){
             {"filter", (void*)fnFilter},
             {"exec", (void*)fnExec},
             {"ascii", (void*)fnAscii},
+            {"open", (void*)fnOpen},
+            {"pow", (void*)fnPow},
+            {"bytes", (void*)fnBytes},
+            {"bytearray", (void*)fnBytearray},
+            {"memoryview", nullptr},
+            {"set", (void*)fnSet},
+            {"frozenset", (void*)fnFrozenset},
+            {"slice", nullptr},
+            {"complex", nullptr},
+            {"compile", (void*)fnCompile},
+            {"breakpoint", (void*)fnBreakpoint},
+            {"help", (void*)fnHelp},
+            {"globals", (void*)fnGlobals},
+            {"locals", (void*)fnLocals},
+            {"__import__", (void*)fnImport},
             {"property", nullptr},
             {"classmethod", nullptr},
             {"staticmethod", nullptr},
@@ -1707,7 +2252,11 @@ minipy::ffilib cffi_builtins_lib(){
             {"object", objectClass},
             {"property", propertyClass},
             {"classmethod", classmethodClass},
-            {"staticmethod", staticmethodClass}
+            {"staticmethod", staticmethodClass},
+            {"file", fileClass},
+            {"memoryview", memoryviewClass},
+            {"slice", sliceClass},
+            {"complex", complexClass}
         });
 }
 

@@ -356,6 +356,11 @@ public:
 // ᠨᠡᠷᠡᠷ ᠢᠶᠡᠨ ᠪᠢᠴᠢᠭᠵᠢᠯᠳᠡᠨ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠬᠠᠯᠠᠬᠤ
     const script_t* findScriptLibrary(const std::string& name) const;
 
+// 执行已注册脚本库的顶层代码 (mainFunction.body), 只执行一次
+// Execute the top-level code (mainFunction.body) of a registered script library, exactly once
+// ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠪᠢᠴᠢᠭᠵᠢᠯᠳᠡᠨ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠶᠢᠨ ᠳᠠᠷᠠᠯᠠᠯᠳ᠋ᠭ᠎ᠠ ᠺᠣᠳ᠋ ᠢ ᠪᠠᠶᠢᠨᠠᠳ᠋ᠣᠭᠰᠣᠨ
+    void executeScriptModule(const std::string& name);
+
 // 构造一个整数 value (堆分配, 自带引用计数)
 // Build an integer value (heap-allocated, reference-counted)
 // ᠲᠣ᠎ value ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
@@ -922,6 +927,11 @@ private:
     std::map<long long, value> callResults;
 
     std::vector<std::pair<std::string, script_t>> scriptLibraries;
+
+// 已执行的脚本库模块名集合 (防止 import 时重复执行顶层代码)
+// Set of already-executed script library module names (prevents repeated top-level execution)
+// ᠪᠠᠶᠢᠨᠠᠳ᠋ᠣᠭᠰᠣᠨ ᠪᠢᠴᠢᠭᠵᠢᠯᠳᠡᠨ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠨᠡᠷᠡ ᠵᠢᠰᠢᠶ᠎ᠡ
+    std::set<std::string> executedScriptModules;
 
     std::vector<ffilib*> cffiLibraries;
 

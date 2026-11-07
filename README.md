@@ -34,6 +34,17 @@ cargo run -p mini-python-demo --bin client -- 127.0.0.1:7878 "hello MiniPython"
 MiniPython received: hello MiniPython
 ```
 
+## 调用方向、数据类型与语法示例
+
+```sh
+cargo run -p mini-python-demo --bin rust_calls_python
+cargo run -p mini-python-demo --bin python_calls_rust
+cargo run -p mini-python-demo --bin data_types
+cargo run -p mini-python-demo --bin syntax
+```
+
+具体传参示例见 [`mini-python-demo`](crates/mini-python-demo/README.md)，语法支持边界见 [`SYNTAX.md`](crates/mini-python-demo/SYNTAX.md)。
+
 ## 添加 Rust 依赖
 
 ```toml

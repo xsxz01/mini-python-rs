@@ -25,9 +25,19 @@
 
 ```toml
 [dependencies]
-mini-python-rs = "0.1.0"
+mini-python-rs = "0.1.1"
 ```
 
+
+## Rust API 文档
+
+在仓库根目录运行：
+
+```sh
+cargo doc -p mini-python-rs --no-deps --open
+```
+
+浏览器会打开 `target/doc/mini_python_rs/index.html`。公开类型和方法的 `///` 注释会显示在 API 页面中。发布到 crates.io 后也可从 [docs.rs](https://docs.rs/mini-python-rs/latest/mini_python_rs/) 在线查看。
 ## 执行脚本
 
 ```rust
@@ -39,6 +49,8 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 ```
+
+上游还提供分阶段执行接口：`load_source(source)` 只加载源码，随后调用 `run()` 执行；`exec_main(source)` 以 `__main__` 方式执行源码。`exception_type()` 可读取待处理 Python 异常类型，`clear_error()` 清理错误状态。`exec(source)` 保持原有直接执行接口。
 
 ## 注册 Rust 原生模块
 

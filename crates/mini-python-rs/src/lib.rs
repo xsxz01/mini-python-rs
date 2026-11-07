@@ -9,6 +9,11 @@ unsafe extern "C" {
     fn mp_vm_free(vm: *mut c_void);
     fn mp_vm_use_stdlib(vm: *mut c_void) -> c_int;
     fn mp_vm_exec_source(vm: *mut c_void, source: *const c_char) -> c_int;
+    fn mp_vm_exec_main(vm: *mut c_void, source: *const c_char) -> c_int;
+    fn mp_vm_load_source(vm: *mut c_void, source: *const c_char) -> c_int;
+    fn mp_vm_run(vm: *mut c_void) -> c_int;
+    fn mp_vm_exception_type(vm: *mut c_void) -> *const c_char;
+    fn mp_vm_clear_error(vm: *mut c_void);
     fn mp_vm_last_error(vm: *mut c_void) -> *const c_char;
     fn mp_vm_get_global(vm: *mut c_void, name: *const c_char) -> *mut c_void;
     fn mp_vm_set_global(vm: *mut c_void, name: *const c_char, value: *mut c_void) -> c_int;
@@ -210,6 +215,52 @@ impl Interpreter {
         }
     }
 
+    /// Loads source without executing it. Call [`Interpreter::run`] to execute it.
+    pub fn load_source(&mut self, source: &str) -> Result<(), String> {
+        let source = CString::new(source)
+            .map_err(|_| "MiniPython source must not contain a NUL byte".to_owned())?;
+        if unsafe { mp_vm_load_source(self.vm.as_ptr(), source.as_ptr()) } == MP_OK {
+            Ok(())
+        } else {
+            Err(self.last_error())
+        }
+    }
+
+    /// Executes source already loaded with [`Interpreter::load_source`].
+    pub fn run(&mut self) -> Result<(), String> {
+        if unsafe { mp_vm_run(self.vm.as_ptr()) } == MP_OK {
+            Ok(())
+        } else {
+            Err(self.last_error())
+        }
+    }
+
+    /// Executes source using the upstream API's `__main__` module semantics.
+    pub fn exec_main(&mut self, source: &str) -> Result<(), String> {
+        let source = CString::new(source)
+            .map_err(|_| "MiniPython source must not contain a NUL byte".to_owned())?;
+        if unsafe { mp_vm_exec_main(self.vm.as_ptr(), source.as_ptr()) } == MP_OK {
+            Ok(())
+        } else {
+            Err(self.last_error())
+        }
+    }
+
+    /// Returns the pending Python exception type, if any.
+    pub fn exception_type(&self) -> Option<String> {
+        let value = unsafe { mp_vm_exception_type(self.vm.as_ptr()) };
+        if value.is_null() {
+            return None;
+        }
+        let name = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+        (!name.is_empty()).then(|| name.into_owned())
+    }
+
+    /// Clears the interpreter's pending error state.
+    pub fn clear_error(&mut self) {
+        unsafe { mp_vm_clear_error(self.vm.as_ptr()) }
+    }
+
     /// Registers source code under a module namespace for later imports and calls.
     pub fn add_module(&mut self, name: &str, source: &str) -> Result<(), String> {
         let name = CString::new(name).map_err(|_| "module name contains a NUL byte".to_owned())?;
@@ -337,9 +388,17 @@ impl fmt::Debug for Interpreter {
 #[cfg(test)]
 mod tests {
     use super::Interpreter;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn test_lock() -> MutexGuard<'static, ()> {
+        TEST_LOCK.lock().expect("test lock")
+    }
 
     #[test]
     fn executes_source_and_reports_python_errors() {
+        let _guard = test_lock();
         let mut interpreter = Interpreter::new().expect("interpreter");
         interpreter.exec("answer = 40 + 2").expect("valid source");
         let error = interpreter.exec("raise ValueError('broken')").unwrap_err();
@@ -348,6 +407,7 @@ mod tests {
 
     #[test]
     fn registers_namespaced_script_modules() {
+        let _guard = test_lock();
         let mut interpreter = Interpreter::new().expect("interpreter");
         interpreter
             .add_module("tools", "def greet(name):\n    return 'greet: ' + name\n")
@@ -363,6 +423,7 @@ mod tests {
 
     #[test]
     fn invokes_multiple_rust_native_module_functions() {
+        let _guard = test_lock();
         use super::{NativeModule, NativeValue};
 
         let mut interpreter = Interpreter::new().expect("interpreter");
@@ -396,7 +457,31 @@ mod tests {
     }
 
     #[test]
+    fn exposes_source_loading_main_execution_and_error_state_apis() {
+        let _guard = test_lock();
+        let mut interpreter = Interpreter::new().expect("interpreter");
+        interpreter
+            .load_source("loaded_value = 40 + 2")
+            .expect("load source");
+        interpreter.run().expect("run loaded source");
+
+        interpreter
+            .exec_main("main_value = 'main'")
+            .expect("execute as main");
+        assert_eq!(
+            interpreter.get_global_string("main_value").as_deref(),
+            Some("main")
+        );
+
+        assert!(interpreter.exec_main("raise ValueError('bad')").is_err());
+        assert_eq!(interpreter.exception_type().as_deref(), Some("ValueError"));
+        interpreter.clear_error();
+        assert_eq!(interpreter.exception_type(), None);
+    }
+
+    #[test]
     fn propagates_native_callback_errors_into_minipython() {
+        let _guard = test_lock();
         use super::NativeModule;
 
         let mut interpreter = Interpreter::new().expect("interpreter");

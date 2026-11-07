@@ -13,7 +13,7 @@ using namespace minipy;
 // data Version
 // data version
 // data Version
-static value dataVersion(cffi& a){ return a.mkstr("1.0.1 MiniPython (ᠮᠢᠨᠢ ᠫᠢᠲ᠋ᠢᠣᠨ Portable Python<3.14.0>)"); }
+static value dataVersion(cffi& a){ return a.mkstr("1.0.3 MiniPython (ᠮᠢᠨᠢ ᠫᠢᠲ᠋ᠢᠣᠨ Portable Python<3.14.0>)"); }
 
 // data Version Info
 // data version info

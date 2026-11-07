@@ -1857,6 +1857,26 @@ std::string vm::toString(const value& v) {
     if (v.type == "str"){
         return *static_cast<std::string*>(v.ptr);
     }
+    if (v.type == "bytes"){
+        auto* raw = static_cast<std::string*>(v.ptr);
+        std::string result = "b'";
+        for (unsigned char ch : *raw){
+            if (ch == '\n') result += "\\n";
+            else if (ch == '\r') result += "\\r";
+            else if (ch == '\t') result += "\\t";
+            else if (ch == '\\') result += "\\\\";
+            else if (ch == '\'') result += "\\'";
+            else if (ch < 32 || ch > 126){
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\x%02x", ch);
+                result += buf;
+            } else {
+                result.push_back(static_cast<char>(ch));
+            }
+        }
+        result += "'";
+        return result;
+    }
     if (v.type == "range"){
         auto* range = static_cast<range_t*>(v.ptr);
         std::string text = "range(" + std::to_string(range->start) + ", " +
@@ -5670,6 +5690,31 @@ const script_t* vm::findScriptLibrary(const std::string& name) const {
     return nullptr;
 }
 
+void vm::executeScriptModule(const std::string& name){
+    if (executedScriptModules.count(name)) return;
+    for (auto& lib : scriptLibraries){
+        if (lib.first == name){
+            executedScriptModules.insert(name);
+
+            script_t prevScript = std::move(script);
+            script = lib.second;
+            const script_t* prevScriptPtr = currentScript;
+            currentScript = &script;
+
+            frames.push_back({currentFileName(), "<module>", 0, &script});
+
+            bool returned = false;
+            value returnValue = makeNone();
+            executeBody(script.mainFunction.body, returned, returnValue);
+
+            frames.pop_back();
+            currentScript = prevScriptPtr;
+            script = std::move(prevScript);
+            return;
+        }
+    }
+}
+
 bool minipy::generatorStateGet(vm& vm, void* handle, const std::string& name, value& result);
 bool minipy::generatorStateCall(vm& vm, ffi_instance& self,
                         const std::vector<value>& args,
@@ -9014,18 +9059,17 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
             continue;
         } else if (ins.operation == eop_import){
 
-
-
             if (ins.operands.size() >= 2){
                 const std::string& moduleName = ins.operands[0];
                 const std::string& alias = ins.operands[1];
                 bool found = false;
+                bool isScriptLib = false;
                 for (auto* lib : cffiLibraries){
                     if (lib && lib->name == moduleName){ found = true; break; }
                 }
                 if (!found){
                     for (auto& lib : scriptLibraries){
-                        if (lib.first == moduleName){ found = true; break; }
+                        if (lib.first == moduleName){ found = true; isScriptLib = true; break; }
                     }
                 }
                 if (!found){
@@ -9044,8 +9088,12 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 if (!found && !failed){
                     raiseError("ModuleNotFoundError", "No module named '" + moduleName + "'");
                 }
-                if (alias != moduleName && !failed){
 
+                if (isScriptLib && !failed){
+                    executeScriptModule(moduleName);
+                }
+
+                if (alias != moduleName && !failed){
                     setVariable(alias, makeNone());
                 }
 
@@ -9060,13 +9108,14 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 const std::string& alias = ins.operands[2];
                 value memberVal = makeNone();
                 bool foundModule = false;
+                bool isScriptLib = false;
 
                 for (auto* lib : cffiLibraries){
                     if (lib && lib->name == moduleName){ foundModule = true; break; }
                 }
                 if (!foundModule){
                     for (auto& lib : scriptLibraries){
-                        if (lib.first == moduleName){ foundModule = true; break; }
+                        if (lib.first == moduleName){ foundModule = true; isScriptLib = true; break; }
                     }
                 }
                 if (!foundModule){
@@ -9076,6 +9125,11 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                         loadpyd(moduleName, pydBytes);
                     }
                 }
+
+                if (isScriptLib && !failed){
+                    executeScriptModule(moduleName);
+                }
+
                 foundModule = false;
                 for (auto* lib : cffiLibraries){
                     if (lib && lib->name == moduleName){
@@ -9100,7 +9154,6 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
 
                         auto classIt = lib->classes.find(memberName);
                         if (classIt != lib->classes.end()){
-
                             setVariable(alias, makeNone());
                             break;
                         }
@@ -9108,9 +9161,44 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                     }
                 }
                 if (!foundModule){
-
                     for (auto& lib : scriptLibraries){
-                        if (lib.first == moduleName){ foundModule = true; break; }
+                        if (lib.first == moduleName){
+                            foundModule = true;
+
+                            function_t* fn = nullptr;
+                            for (auto& f : lib.second.functions){
+                                if (f.name == memberName){ fn = &f; break; }
+                            }
+                            if (fn){
+                                value fnVal;
+                                fnVal.type = "function";
+                                fnVal.ptr = fn;
+                                setVariable(alias, fnVal);
+                                break;
+                            }
+
+                            class_t* cls = nullptr;
+                            for (auto& c : lib.second.classes){
+                                if (c.name == memberName){ cls = &c; break; }
+                            }
+                            if (cls){
+                                initializeClass(*cls);
+                                if (failed) break;
+                                value clsVal;
+                                clsVal.type = "class";
+                                clsVal.ptr = cls;
+                                setVariable(alias, clsVal);
+                                break;
+                            }
+
+                            for (auto& v : lib.second.variables){
+                                if (v.name == memberName){
+                                    setVariable(alias, makeNone());
+                                    break;
+                                }
+                            }
+                            break;
+                        }
                     }
                     if (!foundModule && !failed){
                         raiseError("ModuleNotFoundError", "No module named '" + moduleName + "'");
