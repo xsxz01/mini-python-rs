@@ -59,7 +59,7 @@ struct ffi_instance;
 struct ExceptionPayload{
     std::string type;
     std::string msg;
-    value value;
+    struct value value;
 };
 
 

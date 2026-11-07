@@ -44,13 +44,28 @@ unsafe extern "C" {
     fn mp_ctx_error(ctx: *mut c_void, kind: *const c_char, message: *const c_char);
 }
 
-/// Values supported by the safe native callback interface.
+/// Rust 原生回调接口支持的 Python 标量值。
+///
+/// 目前只允许这五种类型跨越原生回调边界；列表、字典及任意 Python 对象尚未封装。
+///
+/// # 示例
+/// ```
+/// use mini_python_rs::NativeValue;
+///
+/// let value = NativeValue::Integer(42);
+/// assert_eq!(value, NativeValue::Integer(42));
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeValue {
+    /// Python 的 `None`。
     None,
+    /// Python 整数，对应 Rust `i64`。
     Integer(i64),
+    /// Python 浮点数，对应 Rust `f64`。
     Float(f64),
+    /// Python 布尔值。
     Boolean(bool),
+    /// Python UTF-8 字符串。
     String(String),
 }
 
@@ -61,13 +76,34 @@ struct NativeCallback {
     function: NativeFunction,
 }
 
-/// A statically linked collection of Rust callbacks exposed as a MiniPython module.
+/// 可导入的 Rust 原生模块。
+///
+/// 通过 [`Interpreter::load_native_module`] 注册后，Python 可使用 `import <name>` 导入。
+///
+/// # 示例
+/// ```
+/// use mini_python_rs::{NativeModule, NativeValue};
+///
+/// let module = NativeModule::new("native_math").function("add", |args| match args {
+///     [NativeValue::Integer(a), NativeValue::Integer(b)] => {
+///         Ok(NativeValue::Integer(a + b))
+///     }
+///     _ => Err("add 需要两个整数".to_owned()),
+/// });
+/// ```
 pub struct NativeModule {
     name: String,
     functions: Vec<(String, NativeFunction)>,
 }
 
 impl NativeModule {
+    /// 创建一个空的原生模块描述。
+    ///
+    /// # 参数
+    /// - `name`：Python 侧导入的模块名。
+    ///
+    /// # 返回值
+    /// 可继续链式添加回调的模块描述。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -75,6 +111,17 @@ impl NativeModule {
         }
     }
 
+    /// 向模块注册一个 Rust 回调。
+    ///
+    /// 回调接收位置参数切片，成功时返回 `NativeValue`，失败时返回错误信息；错误会作为
+    /// Python `RuntimeError` 传播。回调闭包必须满足 `'static`，并由对应的解释器持有。
+    ///
+    /// # 参数
+    /// - `name`：Python 侧函数名。
+    /// - `function`：处理参数并返回值或错误的闭包。
+    ///
+    /// # 返回值
+    /// 更新后的模块描述，用于继续链式注册。
     pub fn function<F>(mut self, name: impl Into<String>, function: F) -> Self
     where
         F: Fn(&[NativeValue]) -> Result<NativeValue, String> + 'static,
@@ -180,14 +227,27 @@ impl Drop for NativeLibraryHandle {
         unsafe { mp_lib_free(self.0) };
     }
 }
-/// An embedded MiniPython interpreter. Use each instance from one thread only.
+/// 嵌入式 MiniPython 解释器。每个实例只能在一个线程中使用；不要跨线程并发访问同一实例。
 pub struct Interpreter {
     vm: NonNull<c_void>,
     native_callbacks: Vec<Box<NativeCallback>>,
 }
 
 impl Interpreter {
-    /// Creates an interpreter and loads MiniPython's built-in standard library.
+    /// 创建解释器并加载 MiniPython 内置标准库。
+    ///
+    /// # 返回值
+    /// 成功返回新解释器；分配 VM 或初始化标准库失败时返回错误文本。
+    ///
+    /// # 示例
+    /// ```
+    /// use mini_python_rs::Interpreter;
+    ///
+    /// let mut vm = Interpreter::new()?;
+    /// vm.exec("answer = str(40 + 2)")?;
+    /// assert_eq!(vm.get_global_string("answer").as_deref(), Some("42"));
+    /// # Ok::<(), String>(())
+    /// ```
     pub fn new() -> Result<Self, String> {
         // SAFETY: The C API returns an opaque owned VM handle or null.
         let vm = NonNull::new(unsafe { mp_vm_new() })
@@ -203,7 +263,22 @@ impl Interpreter {
         Ok(interpreter)
     }
 
-    /// Compiles and executes Python source in this interpreter's global scope.
+    /// 编译并执行 Python 源码，顶层变量写入此解释器的全局作用域。
+    ///
+    /// # 参数
+    /// - `source`：UTF-8 Python 源码；不能包含 NUL 字节。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；编译或执行失败时返回 traceback 文本。
+    ///
+    /// # 示例
+    /// ```
+    /// # use mini_python_rs::Interpreter;
+    /// # let mut vm = Interpreter::new()?;
+    /// vm.exec("message = '你好'")?;
+    /// assert_eq!(vm.get_global_string("message").as_deref(), Some("你好"));
+    /// # Ok::<(), String>(())
+    /// ```
     pub fn exec(&mut self, source: &str) -> Result<(), String> {
         let source = CString::new(source)
             .map_err(|_| "MiniPython source must not contain a NUL byte".to_owned())?;
@@ -215,7 +290,13 @@ impl Interpreter {
         }
     }
 
-    /// Loads source without executing it. Call [`Interpreter::run`] to execute it.
+    /// 只编译并装载源码，不立即执行；随后调用 [`Interpreter::run`]。
+    ///
+    /// # 参数
+    /// - `source`：UTF-8 Python 源码；不能包含 NUL 字节。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；源码装载失败时返回 traceback 文本。
     pub fn load_source(&mut self, source: &str) -> Result<(), String> {
         let source = CString::new(source)
             .map_err(|_| "MiniPython source must not contain a NUL byte".to_owned())?;
@@ -226,7 +307,10 @@ impl Interpreter {
         }
     }
 
-    /// Executes source already loaded with [`Interpreter::load_source`].
+    /// 执行先前通过 [`Interpreter::load_source`] 装载的源码。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；Python 执行失败时返回 traceback 文本。
     pub fn run(&mut self) -> Result<(), String> {
         if unsafe { mp_vm_run(self.vm.as_ptr()) } == MP_OK {
             Ok(())
@@ -235,7 +319,22 @@ impl Interpreter {
         }
     }
 
-    /// Executes source using the upstream API's `__main__` module semantics.
+    /// 以 Python `__main__` 模块语义编译并执行源码。
+    ///
+    /// # 参数
+    /// - `source`：UTF-8 Python 源码；不能包含 NUL 字节。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；编译或执行失败时返回 traceback 文本。
+    ///
+    /// # 示例
+    /// ```
+    /// # use mini_python_rs::Interpreter;
+    /// # let mut vm = Interpreter::new()?;
+    /// vm.exec_main("def twice(x):\n    return x * 2\nanswer = str(twice(21))")?;
+    /// assert_eq!(vm.get_global_string("answer").as_deref(), Some("42"));
+    /// # Ok::<(), String>(())
+    /// ```
     pub fn exec_main(&mut self, source: &str) -> Result<(), String> {
         let source = CString::new(source)
             .map_err(|_| "MiniPython source must not contain a NUL byte".to_owned())?;
@@ -246,7 +345,10 @@ impl Interpreter {
         }
     }
 
-    /// Returns the pending Python exception type, if any.
+    /// 查询当前待处理 Python 异常的类型名。
+    ///
+    /// # 返回值
+    /// 有待处理异常时返回类型名（如 `Some("ValueError")`）；无异常或名称为空时返回 `None`。
     pub fn exception_type(&self) -> Option<String> {
         let value = unsafe { mp_vm_exception_type(self.vm.as_ptr()) };
         if value.is_null() {
@@ -256,12 +358,31 @@ impl Interpreter {
         (!name.is_empty()).then(|| name.into_owned())
     }
 
-    /// Clears the interpreter's pending error state.
+    /// 清除解释器保存的待处理错误状态。
+    ///
+    /// 本方法不返回值；调用前可用 [`Interpreter::exception_type`] 查询异常类型。
     pub fn clear_error(&mut self) {
         unsafe { mp_vm_clear_error(self.vm.as_ptr()) }
     }
 
-    /// Registers source code under a module namespace for later imports and calls.
+    /// 将 Python 源码注册为可导入模块。
+    ///
+    /// # 参数
+    /// - `name`：模块导入名。
+    /// - `source`：模块源码；模块名和源码均不能包含 NUL 字节。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；注册或编译失败时返回解释器错误文本。
+    ///
+    /// # 示例
+    /// ```
+    /// # use mini_python_rs::Interpreter;
+    /// # let mut vm = Interpreter::new()?;
+    /// vm.add_module("greetings", "def greet(name):\n    return 'Hi, ' + name")?;
+    /// vm.exec_main("import greetings\nanswer = str(greetings.greet('Ada'))")?;
+    /// assert_eq!(vm.get_global_string("answer").as_deref(), Some("Hi, Ada"));
+    /// # Ok::<(), String>(())
+    /// ```
     pub fn add_module(&mut self, name: &str, source: &str) -> Result<(), String> {
         let name = CString::new(name).map_err(|_| "module name contains a NUL byte".to_owned())?;
         let source = CString::new(source)
@@ -274,7 +395,27 @@ impl Interpreter {
         }
     }
 
-    /// Statically registers Rust callbacks as an importable MiniPython module.
+    /// 将 Rust 回调集合静态注册到解释器，供 Python 导入和调用。
+    ///
+    /// # 参数
+    /// - `module`：由 [`NativeModule`] 构造的模块描述；回调只能传递 [`NativeValue`] 支持的标量。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；模块、函数注册或加载失败时返回解释器错误文本。
+    ///
+    /// # 示例
+    /// ```
+    /// # use mini_python_rs::{Interpreter, NativeModule, NativeValue};
+    /// # let mut vm = Interpreter::new()?;
+    /// let module = NativeModule::new("native_math").function("add", |args| match args {
+    ///     [NativeValue::Integer(a), NativeValue::Integer(b)] => Ok(NativeValue::Integer(a + b)),
+    ///     _ => Err("需要两个整数".to_owned()),
+    /// });
+    /// vm.load_native_module(module)?;
+    /// vm.exec_main("from native_math import add\nanswer = str(add(20, 22))")?;
+    /// assert_eq!(vm.get_global_string("answer").as_deref(), Some("42"));
+    /// # Ok::<(), String>(())
+    /// ```
     pub fn load_native_module(&mut self, module: NativeModule) -> Result<(), String> {
         let name = CString::new(module.name)
             .map_err(|_| "native module name contains a NUL byte".to_owned())?;
@@ -316,7 +457,14 @@ impl Interpreter {
         }
     }
 
-    /// Stores a UTF-8 string in the interpreter's global namespace.
+    /// 将 UTF-8 字符串设置到解释器全局作用域。
+    ///
+    /// # 参数
+    /// - `name`：全局变量名，不能包含 NUL 字节。
+    /// - `value`：字符串内容；支持 UTF-8 和内嵌 NUL 字节。
+    ///
+    /// # 返回值
+    /// 成功返回 `Ok(())`；名称或值构造/设置失败时返回错误文本。
     pub fn set_global_string(&mut self, name: &str, value: &str) -> Result<(), String> {
         let name = CString::new(name).map_err(|_| "global name contains a NUL byte".to_owned())?;
         // mp_str_n accepts an explicit byte length, including embedded NULs.
@@ -334,7 +482,13 @@ impl Interpreter {
         }
     }
 
-    /// Reads a global string, returning `None` when the name is missing or not a string.
+    /// 读取全局作用域中的字符串变量。
+    ///
+    /// # 参数
+    /// - `name`：要查询的全局变量名。
+    ///
+    /// # 返回值
+    /// 变量存在且为字符串时返回其内容；名称含 NUL、变量不存在或变量不是字符串时返回 `None`。
     pub fn get_global_string(&self, name: &str) -> Option<String> {
         let name = CString::new(name).ok()?;
         let value = unsafe { mp_vm_get_global(self.vm.as_ptr(), name.as_ptr()) };

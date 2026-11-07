@@ -23,8 +23,8 @@ cargo run -p mini-python-demo --bin syntax
 | 分支与循环 | `if/elif/else`、`for`、`while`、`break`、`continue`、循环 `else` |
 | 函数与作用域 | 顶层函数调用、默认参数、位置专用参数、关键字专用参数、`*args` / `**kwargs`、调用参数展开、装饰器（含参数化装饰器）、`global`、`nonlocal`、闭包调用、`yield`、`yield from` |
 | 类与模式 | 类、实例方法、match 序列/映射/类模式、guard 和 or-pattern |
-| 异常与上下文 | `try/except/finally`、异常别名、`raise from`、`except*`、单个及异步上下文管理器语法 |
-| 字符串/字面量 | f-string、bytes、原始字符串、多行字符串、Ellipsis、数字进制字面量 |
+| 异常与上下文 | `try/except/finally`、异常别名、`raise from`、单个及异步上下文管理器语法；`except*` 见失败项 |
+| 字符串/字面量 | f-string、bytes、原始字符串、多行字符串、Ellipsis |
 | 模块与异步 | `import math` 并调用函数、`async def`、`await` 表达式、`async for`、`async with` 定义源码 |
 | 其他 | 多行续行、`type Alias = int` 类型别名 |
 
@@ -44,8 +44,8 @@ cargo run -p mini-python-demo --bin syntax
 
 Rust `Interpreter` 新增 `load_source`、`run`、`exec_main`、`exception_type` 和 `clear_error`，分别绑定上游 C API 的源码加载/执行、`__main__` 执行、异常类型查询和错误状态清理。`exec` 保留为原有 `mp_vm_exec_source` 包装。
 
-工作区构建脚本优先使用 `thirdparty/3.14.0/src`，因此本报告运行的是该目录中的更新版实现。`crates/mini-python-rs/vendor/mini-python/src` 是 crates.io 打包回退源码；本次未将上游改动同步到该副本。离开本地工作区的打包构建仍可能使用旧实现，发布前必须同步更新后的上游源文件并验证 `cargo package` 构建。
+工作区构建脚本优先使用 `thirdparty/3.14.0/src`；已将必要 C++ 头文件改动同步至 `crates/mini-python-rs/vendor/mini-python/src`，并通过 `cargo package -p mini-python-rs --allow-dirty` 验证打包副本可独立构建。
 
 ## 结论与未测边界
 
-解释器实测显示，作者综合脚本成功，但探针仍发现上述六项失败。因此，作者所称“完美支持 Python 3 的所有语法”**未被本次测试证实**，并且现有实测已经找到反例。测试没有覆盖 Python 3 全部语法产生式、每项语法的所有边界情况，也没有验证全部语义或标准库兼容性；其余语法标为未测，不推断通过或失败。
+解释器实测显示，作者综合脚本成功，但探针仍发现上述七项失败。因此，作者所称“完美支持 Python 3 的所有语法”**未被本次测试证实**，并且现有实测已经找到反例。测试没有覆盖 Python 3 全部语法产生式、每项语法的所有边界情况，也没有验证全部语义或标准库兼容性；其余语法标为未测，不推断通过或失败。

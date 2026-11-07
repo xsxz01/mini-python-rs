@@ -63,7 +63,7 @@ struct ffi_instance{
 // cffi ᠦᠨᠳᠡᠬᠡ: ᠨᠠᠲᠢᠪ ᠶᠢᠳᠡ ᠶᠢᠨ ᠬᠤᠷᠢᠶᠠᠯᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠪᠠᠶᠢᠳᠠᠯ
 class cffi{
 public:
-    vm* vm = nullptr;
+    class vm* vm = nullptr;
     const ffilib* library = nullptr;
     const ffi_class* currentClass = nullptr;
     std::vector<value> argv;

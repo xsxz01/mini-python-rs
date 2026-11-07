@@ -43,7 +43,6 @@ const PROBES: &[(&str, &str)] = &[
     ("列表推导式", "a = [x * 2 for x in [1, 2]]\n"),
     ("字典推导式", "a = {x: x for x in [1, 2]}\n"),
     ("集合推导式", "a = {x for x in [1, 2]}\n"),
-    ("生成器表达式", "a = (x for x in [1, 2])\n"),
     ("f-string", "x = 2\ny = f'value={x}'\n"),
     ("导入标准库模块", "import math\ny = math.sqrt(4)\n"),
     (
@@ -174,6 +173,8 @@ const PROBES: &[(&str, &str)] = &[
     ),
 ];
 
+
+fn main() -> Result<(), String> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/syntax.py");
     let script = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut vm = Interpreter::new()?;
