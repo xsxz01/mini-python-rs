@@ -1,9 +1,8 @@
 #include "../cffi.hpp"
+#include "../platform.hpp"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -11,21 +10,80 @@
 namespace minipy {
 
 
-
-
-
-
-
-
-
-
-
 bool ctypesCall(minipy::vm& vm, minipy::ffi_instance& self, const std::vector<minipy::value>& args,
                 const std::map<std::string, minipy::value>& kwargs, minipy::value& result);
 bool ctypesGet(minipy::vm& vm, void* handle, const std::string& name, minipy::value& result);
 
-std::map<std::string, HMODULE>& moduleCache(){
-    static std::map<std::string, HMODULE> cache;
+
+enum{
+    ctArgWord = 0,   // 原样 64 位: 指针 / long long / 浮点
+    ctArgS8 = 1,     // 有符号 8 位
+    ctArgU8 = 2,     // 无符号 8 位
+    ctArgS16 = 3,    // 有符号 16 位
+    ctArgU16 = 4,    // 无符号 16 位
+    ctArgS32 = 5,    // 有符号 32 位
+    ctArgU32 = 6     // 无符号 32 位
+};
+
+// 按 ctypes 类型名确定整数宽度种类
+// Map a ctypes type name to an integer width kind
+// ctypes ᠲᠥᠷᠥᠯ ᠦᠨ ᠨᠡᠷᠡ ᠪᠡᠷ ᠴᠠᠭᠠᠨ ᠤ ᠣᠷᠭᠠᠨ ᠴᠣᠮ ᠢ ᠲᠣᠭᠲᠠᠭᠠᠬᠤ
+static int ctypesArgKind(const std::string& typeName){
+    static const bool longIs32 = sizeof(long) == 4;
+    if (typeName == "c_int" || typeName == "c_int32") return ctArgS32;
+    if (typeName == "c_uint" || typeName == "c_uint32") return ctArgU32;
+    if (typeName == "c_short") return ctArgS16;
+    if (typeName == "c_ushort") return ctArgU16;
+    if (typeName == "c_byte" || typeName == "c_char") return ctArgS8;
+    if (typeName == "c_ubyte") return ctArgU8;
+    if (typeName == "c_wchar") return ctArgU16;
+    if (typeName == "c_bool") return ctArgU8;
+    if (typeName == "c_long") return longIs32 ? ctArgS32 : ctArgWord;
+    if (typeName == "c_ulong") return longIs32 ? ctArgU32 : ctArgWord;
+    return ctArgWord;
+}
+
+// 参数在栈上占用的字节数: 仅 32 位 x86 需要区分 (64 位平台栈槽固定 8 字节)
+// Bytes an argument occupies on the stack; only x86-32 needs this (64-bit slots are always 8)
+// ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠳᠤ ᠡᠵᠡᠯᠡᠬᠦ ᠪᠠᠢᠲᠤ
+static int ctypesArgSize(const std::string& typeName){
+#if defined(_M_IX86) || defined(__i386__)
+    if (typeName == "c_longlong" || typeName == "c_ulonglong" ||
+        typeName == "c_int64" || typeName == "c_uint64" || typeName == "c_double")
+        return 8;
+    if (typeName == "c_size_t" || typeName == "c_ssize_t")
+        return static_cast<int>(sizeof(size_t));
+    if (typeName == "c_long" || typeName == "c_ulong")
+        return static_cast<int>(sizeof(long));
+    if (typeName == "c_void_p" || typeName == "c_char_p" || typeName == "c_wchar_p")
+        return static_cast<int>(sizeof(void*));
+    return 4;
+#else
+    (void)typeName;
+    return 8;
+#endif
+}
+
+// 按宽度种类把原始整数规范化 (截断到低位并做符号/零扩展)
+// Normalize a raw integer by width kind (truncate to low bits, then sign/zero extend)
+// ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠤᠨ ᠴᠠᠭᠠᠨ ᠢ ᠬᠡᠪᠲᠡᠭᠡᠬᠦ
+static long long ctypesNormalizeArg(long long raw, int kind){
+    switch (kind){
+    case ctArgS8: return static_cast<long long>(static_cast<signed char>(raw));
+    case ctArgU8: return static_cast<long long>(static_cast<unsigned char>(raw));
+    case ctArgS16: return static_cast<long long>(static_cast<short>(raw));
+    case ctArgU16: return static_cast<long long>(static_cast<unsigned short>(raw));
+    case ctArgS32: return static_cast<long long>(static_cast<int>(raw));
+    case ctArgU32: return static_cast<long long>(static_cast<unsigned int>(raw));
+    default: return raw;
+    }
+}
+
+// 已加载共享库缓存, 同一名称只加载一次
+// Cache of loaded shared libraries so each name is loaded once
+// ᠲᠠᠲᠠᠭᠰᠠᠨ ᠰᠠᠩ ᠤᠨ ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ
+std::map<std::string, mp_module>& moduleCache(){
+    static std::map<std::string, mp_module> cache;
     return cache;
 }
 
@@ -37,51 +95,26 @@ bool endsWithChar(const std::string& text, char c){
 }
 
 
-// utf8 转 Wide
-// utf8 to wide
-// utf8 ᠬᠡᠪᠡᠷᠢᠶ᠎ᠡᠷᠢᠶᠡᠨ᠎ᠠ Wide
-std::wstring utf8ToWide(const std::string& text){
-    std::wstring result;
-    size_t i = 0;
-    while (i < text.size()){
-        unsigned char c = static_cast<unsigned char>(text[i]);
-        long long code = 0;
-        size_t extra = 0;
-        if (c < 0x80){ code = c; extra = 0; }
-        else if ((c & 0xE0) == 0xC0){ code = c & 0x1F; extra = 1; }
-        else if ((c & 0xF0) == 0xE0){ code = c & 0x0F; extra = 2; }
-        else if ((c & 0xF8) == 0xF0){ code = c & 0x07; extra = 3; }
-        else { i++; continue; }
-        bool valid = (i + extra < text.size());
-        for (size_t k = 1; valid && k <= extra; ++k){
-            unsigned char next = static_cast<unsigned char>(text[i + k]);
-            if ((next & 0xC0) != 0x80) valid = false;
-            else code = (code << 6) | (next & 0x3F);
-        }
-        i += extra + 1;
-        if (!valid) continue;
-        if (code >= 0x10000){
-            long long offset = code - 0x10000;
-            result.push_back(static_cast<wchar_t>(0xD800 + (offset >> 10)));
-            result.push_back(static_cast<wchar_t>(0xDC00 + (offset & 0x3FF)));
-        } else if (code > 0){
-            result.push_back(static_cast<wchar_t>(code));
-        }
-    }
-    return result;
-}
-
 // 加载 模块
 // load module
 // ᠠᠶᠢᠯᠳᠠᠬᠤ ᠦᠪᠲ᠋ᠠᠢ
-HMODULE loadModule(const std::string& name, std::string& error){
+mp_module loadModule(const std::string& name, std::string& error){
     auto it = moduleCache().find(name);
     if (it != moduleCache().end()) return it->second;
-    std::string full = name;
-    if (full.find('.') == std::string::npos) full += ".dll";
-    HMODULE module = LoadLibraryW(utf8ToWide(full).c_str());
-    if (module == nullptr){
+
+// 按平台候选名依次尝试, Windows 自动补 .dll, 类 Unix 补 .so / .dylib
+// Try platform candidates in order: .dll on Windows, .so or .dylib on Unix
+// ᠲᠠᠯᠠᠪᠠᠢ ᠶᠢᠨ ᠨᠡᠷᠡ ᠦᠨ ᠵᠢᠭᠰᠠᠭᠠᠯ ᠢ ᠳᠠᠷᠠᠭ᠎ᠠ ᠪᠡᠷ ᠰᠢᠯᠭᠠᠨ᠎ᠠ
+    mp_module module = nullptr;
+    std::string lastError;
+    for (const auto& candidate : mpSharedLibraryCandidates(name)){
+        module = mpLoadLibrary(candidate);
+        if (module) break;
+        lastError = mpLibraryError();
+    }
+    if (!module){
         error = "Could not find module '" + name + "'";
+        if (!lastError.empty()) error += ": " + lastError;
         return nullptr;
     }
     moduleCache()[name] = module;
@@ -116,12 +149,12 @@ bool ctypesGet(minipy::vm& vm, void* handle, const std::string& name, minipy::va
     }
     if (info->kind == ctypes_library){
         std::string error;
-        HMODULE module = loadModule(info->dllName, error);
+        mp_module module = loadModule(info->dllName, error);
         if (module == nullptr){
             vm.raiseError("OSError", error);
             return true;
         }
-        void* proc = reinterpret_cast<void*>(GetProcAddress(module, name.c_str()));
+        void* proc = mpGetProcAddress(module, name.c_str());
         if (proc == nullptr) return false;
         auto* fn = new CtypesHandle();
         fn->kind = ctypes_function;
@@ -206,11 +239,16 @@ bool ctypesCall(minipy::vm& vm, minipy::ffi_instance& self, const std::vector<mi
     }
 
     bool returnsDouble = false;
+    // 声明的返回宽度: 未声明时按 64 位处理, 与既有行为保持一致
+    // Declared return width: defaults to 64-bit when unspecified, preserving existing behavior
+    // ᠲᠣᠭᠲᠠᠭᠠᠭᠳᠠᠭᠰᠠᠨ ᠪᠤᠴᠠᠭᠤᠯᠤᠭ᠎ᠠ ᠤᠨ ᠣᠷᠭᠠᠨ
+    int returnKind = ctArgWord;
     auto restypeIt = self.attributes.find("restype");
     if (restypeIt != self.attributes.end() &&
         restypeIt->second.type == "native_object" && restypeIt->second.ptr != nullptr){
         auto* marker = static_cast<minipy::ffi_instance*>(restypeIt->second.ptr);
         if (marker->typeName == "c_double") returnsDouble = true;
+        else returnKind = ctypesArgKind(marker->typeName);
     }
 
     bool wide = endsWithChar(info->procName, 'W');
@@ -252,7 +290,15 @@ bool ctypesCall(minipy::vm& vm, minipy::ffi_instance& self, const std::vector<mi
             continue;
         }
         if (arg.type == "native_object" && arg.ptr != nullptr){
-            raw[i] = static_cast<minipy::ffi_instance*>(arg.ptr)->handle;
+            auto* inst = static_cast<minipy::ffi_instance*>(arg.ptr);
+            // 回调对象传给 C 时必须使用跳板地址, 而不是内部的封装结构
+            // A callback object must hand its trampoline address to C, not the wrapper
+            // ᠪᠤᠴᠠᠭᠤᠯᠬᠤ ᠣᠪᠶᠡᠭᠲ ᠤᠨ ᠬᠠᠶᠢᠭ᠎ᠠ
+            if (inst->typeName == "Callback" && inst->handle != nullptr){
+                raw[i] = static_cast<CtypesCBWrap*>(inst->handle)->trampoline;
+            } else {
+                raw[i] = inst->handle;
+            }
             continue;
         }
         std::string typeName = arg.type == "none" ? "NoneType" : arg.type;
@@ -316,6 +362,7 @@ bool ctypesCall(minipy::vm& vm, minipy::ffi_instance& self, const std::vector<mi
                 CT_CASE_I(15, d0, d1, d2, d3)
 #undef CT_CASE_I
             }
+            ret = ctypesNormalizeArg(ret, returnKind);
             result = vm.makeInt(ret);
         }
         return true;
@@ -346,6 +393,7 @@ bool ctypesCall(minipy::vm& vm, minipy::ffi_instance& self, const std::vector<mi
         case 12: ret = reinterpret_cast<fn12>(proc)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11]); break;
         default: break;
     }
+    ret = ctypesNormalizeArg(ret, returnKind);
     result = vm.makeInt(ret);
     return true;
 }
@@ -457,6 +505,29 @@ static minipy::value dataCCharP(minipy::cffi& a){ return makeTypeMarker(a, "c_ch
 // data C Wchar P
 static minipy::value dataCWcharP(minipy::cffi& a){ return makeTypeMarker(a, "c_wchar_p"); }
 
+// 生成整数/布尔类型标记的 data 入口
+// Produce an integer/bool type-marker data entry
+// ᠳ᠋ᠠᠩ ᠲᠣ᠎ ᠮᠠᠷᠬᠢᠷ ᠤᠨ ᠭᠠᠷᠠᠯᠭ᠎ᠠ
+#define MP_CTYPES_MARKER(fnName, typeName) \
+    static minipy::value fnName(minipy::cffi& a){ return makeTypeMarker(a, typeName); }
+MP_CTYPES_MARKER(dataCUInt, "c_uint")
+MP_CTYPES_MARKER(dataCLong, "c_long")
+MP_CTYPES_MARKER(dataCULong, "c_ulong")
+MP_CTYPES_MARKER(dataCLongLong, "c_longlong")
+MP_CTYPES_MARKER(dataCULongLong, "c_ulonglong")
+MP_CTYPES_MARKER(dataCInt64, "c_int64")
+MP_CTYPES_MARKER(dataCUInt64, "c_uint64")
+MP_CTYPES_MARKER(dataCSsize, "c_ssize_t")
+MP_CTYPES_MARKER(dataCSize, "c_size_t")
+MP_CTYPES_MARKER(dataCShort, "c_short")
+MP_CTYPES_MARKER(dataCUShort, "c_ushort")
+MP_CTYPES_MARKER(dataCByte, "c_byte")
+MP_CTYPES_MARKER(dataCUByte, "c_ubyte")
+MP_CTYPES_MARKER(dataCChar, "c_char")
+MP_CTYPES_MARKER(dataCWchar, "c_wchar")
+MP_CTYPES_MARKER(dataCBool, "c_bool")
+#undef MP_CTYPES_MARKER
+
 
 // fn C Integer
 // fn c integer
@@ -494,14 +565,14 @@ static minipy::value fnCPointer(minipy::cffi& a){
 // fn get last error
 // fn ᠬᠠᠯᠠᠬᠤ Last ᠲᠠᠯᠳ᠋ᠠᠭᠤᠯᠭ᠎ᠠ
 static minipy::value fnGetLastError(minipy::cffi& a){
-    return a.mkint(static_cast<long long>(GetLastError()));
+    return a.mkint(static_cast<long long>(mpLastError()));
 }
 
 // fn 集合 Last 错误
 // fn set last error
 // fn ᠨᠢᠳᠡᠳᠡᠯ ᠰᠡᠲ Last ᠲᠠᠯᠳ᠋ᠠᠭᠤᠯᠭ᠎ᠠ
 static minipy::value fnSetLastError(minipy::cffi& a){
-    SetLastError(static_cast<DWORD>(a.argc() > 0 ? a.arg_int(0) : 0));
+    mpSetLastError(static_cast<unsigned long>(a.argc() > 0 ? a.arg_int(0) : 0));
     return a.none();
 }
 
@@ -835,7 +906,18 @@ static bool cfuncTypeStubCall(minipy::vm& vm, minipy::ffi_instance& self,
 // ctypes callback context
 // ctypes Callback Context
 struct CtypesCallbackContext{
-    long long savedArgs[4] = {0, 0, 0, 0};
+    // 回调参数槽, 各平台跳板按自身 ABI 写入, 最多 16 个整数/指针参数
+    // Argument slots filled by the platform trampoline according to its ABI, up to 16
+    // ᠴᠠᠭᠠᠨ ᠤ ᠵᠠᠪᠰᠠᠷ ᠤᠨ ᠲᠥᠯᠦᠪ
+    long long savedArgs[16] = {0};
+    // 每个参数的真实宽度种类: ABI 只保证窄于 64 位的槽位低字节有效, 高位可能是垃圾
+    // Width kind per argument: the ABI only guarantees low bytes of narrow slots, high bits may be garbage
+    // ᠬᠡᠷᠡᠴᠡᠯᠲᠡᠢ ᠴᠠᠭᠠᠨ ᠤ ᠣᠷᠭᠠᠨ ᠴᠣᠮ
+    int argKinds[16] = {0};
+    // 每个参数占用的栈字节数, x86-32 的 long long 占 8 字节 (两个栈槽)
+    // Stack bytes per argument; long long occupies 8 bytes (two slots) on x86-32
+    // ᠴᠠᠭᠠᠨ ᠤ ᠡᠵᠡᠯᠡᠬᠦ ᠪᠠᠢᠲᠤ ᠬᠡᠮᠵᠢᠶ᠎ᠡ
+    int argSizes[16] = {0};
     minipy::vm* vm = nullptr;
     minipy::function_t* function = nullptr;
     std::string pythonFuncName;
@@ -843,8 +925,6 @@ struct CtypesCallbackContext{
     size_t trampolineSize = 0;
     int argCount = 0;
 };
-
-
 
 
 // ctypes C Func 类型 Stub
@@ -867,8 +947,10 @@ extern "C" long long ctypesCallbackDispatcher(CtypesCallbackContext* ctx){
     minipy::vm::ErrorSnapshot saved = vm.saveErrorState();
     std::vector<minipy::value> args;
     int count = ctx->argCount;
-    if (count > 4) count = 4;
-    for (int i = 0; i < count; ++i) args.push_back(vm.makeInt(ctx->savedArgs[i]));
+    if (count > 16) count = 16;
+    if (count < 0) count = 0;
+    for (int i = 0; i < count; ++i)
+        args.push_back(vm.makeInt(ctypesNormalizeArg(ctx->savedArgs[i], ctx->argKinds[i])));
     minipy::value result = vm.invoke(ctx->function, args);
     long long ret = 0;
     if (!vm.hasError()) ret = vm.toInt(result);
@@ -886,52 +968,223 @@ extern "C" long long ctypesCallbackDispatcher(CtypesCallbackContext* ctx){
 
 
 
-// 构造 Trampoline
-// make trampoline
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
+// 写入一条 4 字节指令
+// Emit one 4-byte instruction
+// ᠳᠥᠷᠪᠡᠨ ᠪᠠᠢᠲᠤ ᠵᠠᠠᠪᠤᠷ ᠢ ᠪᠢᠴᠢᠬᠦ
+static void emitCode32(unsigned char*& p, unsigned int ins){
+    std::memcpy(p, &ins, 4);
+    p += 4;
+}
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+// 写入 64 位绝对地址立即数
+// Emit an absolute 64-bit address immediate
+// ᠠᠪᠰᠣᠯᠢᠤᠲ 64 ᠪᠠᠢᠲᠤ ᠬᠠᠶᠢᠭ᠎ᠠ
+static void emitImm64(unsigned char*& p, const void* value){
+    std::memcpy(p, &value, 8);
+    p += 8;
+}
+#endif
+
+#if defined(_M_IX86) || defined(__i386__)
+// 写入 32 位绝对地址立即数
+// Emit an absolute 32-bit address immediate
+// ᠠᠪᠰᠣᠯᠢᠤᠲ 32 ᠪᠠᠢᠲᠤ ᠬᠠᠶᠢᠭ᠎ᠠ
+static void emitImm32(unsigned char*& p, unsigned int value){
+    std::memcpy(p, &value, 4);
+    p += 4;
+}
+#endif
+
+#if defined(__arm__) || defined(_M_ARM)
+// ARMv7: 把 32 位地址装入寄存器 (MOVW + MOVT)
+// ARMv7: load a 32-bit address into a register (MOVW + MOVT)
+// ARMv7: 32 ᠪᠠᠢᠲᠤ ᠬᠠᠶᠢᠭ᠎ᠠ ᠢ ᠰᠠᠨᠠᠭᠤᠯᠤᠭ᠎ᠠ ᠳᠤ ᠬᠡᠪᠲᠡᠭᠡᠬᠦ
+static void emitArmMovImm(unsigned char*& p, unsigned int rd, const void* value){
+    unsigned int v = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(value));
+    emitCode32(p, 0xE3000000u | (((v >> 12) & 0xFu) << 16) | (rd << 12) | (v & 0xFFFu));
+    unsigned int hi = (v >> 16) & 0xFFFFu;
+    emitCode32(p, 0xE3400000u | ((hi >> 12) << 16) | (rd << 12) | (hi & 0xFFFu));
+}
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+// AArch64: 把 64 位地址装入寄存器 (MOVZ + 3×MOVK)
+// AArch64: load a 64-bit address into a register (MOVZ + 3x MOVK)
+// AArch64: 64 ᠪᠠᠢᠲᠤ ᠬᠠᠶᠢᠭ᠎ᠠ ᠢ ᠰᠠᠨᠠᠭᠤᠯᠤᠭ᠎ᠠ ᠳᠤ ᠬᠡᠪᠲᠡᠭᠡᠬᠦ
+static void emitA64MovImm(unsigned char*& p, unsigned int rd, const void* value){
+    unsigned long long v = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(value));
+    emitCode32(p, 0xD2800000u | ((static_cast<unsigned int>(v & 0xFFFFu)) << 5) | rd);
+    emitCode32(p, 0xF2800000u | (1u << 21) | ((static_cast<unsigned int>((v >> 16) & 0xFFFFu)) << 5) | rd);
+    emitCode32(p, 0xF2800000u | (2u << 21) | ((static_cast<unsigned int>((v >> 32) & 0xFFFFu)) << 5) | rd);
+    emitCode32(p, 0xF2800000u | (3u << 21) | ((static_cast<unsigned int>((v >> 48) & 0xFFFFu)) << 5) | rd);
+}
+#endif
+
+// 构造 Trampoline: 按平台/架构生成符合本机 ABI 的跳板机器码
+// Make trampoline: emit ABI-correct machine code for the current platform/arch
 // ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ Trampoline
 static void* makeTrampoline(CtypesCallbackContext* ctx, const void* dispatcherFunc){
-    SIZE_T size = 4096;
-    void* code = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+// WASM 无 JIT 可执行内存, 回调降级为不可用
+// WASM has no JIT executable memory, callbacks degrade to unavailable
+// WASM ᠳᠤ JIT ᠭᠦᠢᠴᠡᠳᠬᠡᠬᠦ ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠦᠭᠡᠢ
+#if defined(MINIPY_OS_WASM)
+    (void)ctx;
+    (void)dispatcherFunc;
+    return nullptr;
+#else
+    size_t size = 4096;
+    void* code = mpAllocateExecutable(size);
     if (!code) return nullptr;
     unsigned char* p = static_cast<unsigned char*>(code);
 
-    p[0] = 0x48; p[1] = 0xB8;
-    memcpy(p + 2, &ctx, 8);
-    p += 10;
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(MINIPY_OS_WINDOWS)
+    // Windows x64 (Microsoft ABI): rcx/rdx/r8/r9, 32 字节 shadow space, rax 返回
+    // Windows x64 (Microsoft ABI): rcx/rdx/r8/r9, 32-byte shadow space, return in rax
+    // Windows x64 (Microsoft ABI): rcx/rdx/r8/r9, 32 ᠪᠠᠢᠲᠤ shadow space
+    *p++ = 0x49; *p++ = 0xBA;
+    emitImm64(p, ctx);
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x4A; *p++ = 0x00;
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x52; *p++ = 0x08;
+    *p++ = 0x4D; *p++ = 0x89; *p++ = 0x42; *p++ = 0x10;
+    *p++ = 0x4D; *p++ = 0x89; *p++ = 0x4A; *p++ = 0x18;
+    for (int i = 0; i < 8; ++i){
+        *p++ = 0x48; *p++ = 0x8B; *p++ = 0x44; *p++ = 0x24;
+        *p++ = static_cast<unsigned char>(40 + i * 8);
+        *p++ = 0x49; *p++ = 0x89; *p++ = 0x42;
+        *p++ = static_cast<unsigned char>(32 + i * 8);
+    }
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x28;
+    *p++ = 0x4C; *p++ = 0x89; *p++ = 0xD1;
+    *p++ = 0x48; *p++ = 0xB8;
+    emitImm64(p, dispatcherFunc);
+    *p++ = 0xFF; *p++ = 0xD0;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xC4; *p++ = 0x28;
+    *p++ = 0xC3;
+#elif defined(__x86_64__) || defined(_M_X64)
+    // SysV x64 (Linux/macOS/Android/HarmonyOS): rdi/rsi/rdx/rcx/r8/r9, 无 shadow space
+    // SysV x64 (Linux/macOS/Android/HarmonyOS): rdi/rsi/rdx/rcx/r8/r9, no shadow space
+    // SysV x64: rdi/rsi/rdx/rcx/r8/r9
+    *p++ = 0x49; *p++ = 0xBA;
+    emitImm64(p, ctx);
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x7A; *p++ = 0x00;
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x72; *p++ = 0x08;
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x52; *p++ = 0x10;
+    *p++ = 0x49; *p++ = 0x89; *p++ = 0x4A; *p++ = 0x18;
+    *p++ = 0x4D; *p++ = 0x89; *p++ = 0x42; *p++ = 0x20;
+    *p++ = 0x4D; *p++ = 0x89; *p++ = 0x4A; *p++ = 0x28;
+    for (int i = 0; i < 8; ++i){
+        *p++ = 0x48; *p++ = 0x8B; *p++ = 0x44; *p++ = 0x24;
+        *p++ = static_cast<unsigned char>(8 + i * 8);
+        *p++ = 0x49; *p++ = 0x89; *p++ = 0x42;
+        *p++ = static_cast<unsigned char>(48 + i * 8);
+    }
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xEC; *p++ = 0x08;
+    *p++ = 0x4C; *p++ = 0x89; *p++ = 0xD7;
+    *p++ = 0x48; *p++ = 0xB8;
+    emitImm64(p, dispatcherFunc);
+    *p++ = 0xFF; *p++ = 0xD0;
+    *p++ = 0x48; *p++ = 0x83; *p++ = 0xC4; *p++ = 0x08;
+    *p++ = 0xC3;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // AArch64 (iOS/macOS/Android/HarmonyOS/Linux/Windows ARM64): x0-x7, 栈参数, x0 返回
+    // AArch64 (iOS/macOS/Android/HarmonyOS/Linux/Windows ARM64): x0-x7, stack args, return in x0
+    // AArch64: x0-x7, ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠤᠨ ᠴᠠᠭᠠᠨ
+    for (int i = 0; i < 8; ++i){
+        emitCode32(p, 0xF9000000u | (static_cast<unsigned int>(i) << 10) |
+                          (9u << 5) | static_cast<unsigned int>(i));
+    }
+    emitCode32(p, 0xAA0903E0u);
+    for (int i = 0; i < 8; ++i){
+        emitCode32(p, 0xF9400000u | (static_cast<unsigned int>(i) << 10) | (31u << 5) | 10u);
+        emitCode32(p, 0xF9000000u | (static_cast<unsigned int>(8 + i) << 10) | (9u << 5) | 10u);
+    }
+    emitA64MovImm(p, 16u, dispatcherFunc);
+    emitCode32(p, 0xD63F0200u);
+    emitCode32(p, 0xD65F03C0u);
+#elif defined(__arm__) || defined(_M_ARM)
+    // ARMv7 A32 (Android/iOS 32 位): r0-r3 + 栈参数, r0 返回
+    // ARMv7 A32 (Android/iOS 32-bit): r0-r3 plus stack args, return in r0
+    // ARMv7 A32: r0-r3, ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠤᠨ ᠴᠠᠭᠠᠨ
+    emitArmMovImm(p, 12, ctx);
+    for (int i = 0; i < 4; ++i){
+        emitCode32(p, 0xE58C0000u | (static_cast<unsigned int>(i) << 12) |
+                          static_cast<unsigned int>(i * 8));
+    }
+    // AAPCS: 第 5 个起的参数紧跟 sp 起始, 偏移从 0 开始
+    // AAPCS: the 5th argument onward starts right at sp, offset begins at 0
+    // AAPCS: ᠲᠠᠪᠤᠳᠤᠭᠠᠷ ᠡᠴᠡ ᠡᠬᠢᠯᠡᠵᠦ ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠳᠤ
+    for (int i = 4; i < 12; ++i){
+        emitCode32(p, 0xE59D0000u | static_cast<unsigned int>((i - 4) * 4));
+        emitCode32(p, 0xE58C0000u | static_cast<unsigned int>(i * 8));
+    }
+    emitCode32(p, 0xE92D4010u);
+    emitArmMovImm(p, 0, dispatcherFunc);
+    emitCode32(p, 0xE12FFF30u);
+    emitCode32(p, 0xE8BD8010u);
+#elif defined(_M_IX86) || defined(__i386__)
+    // x86 32 位 (Windows/Linux): 全部参数在栈上, eax 返回
+    // x86 32-bit (Windows/Linux): all arguments on the stack, return in eax
+    // x86 32 ᠪᠠᠢᠲᠤ: ᠪᠦᠬᠦᠨ ᠴᠠᠭᠠᠨ ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠳᠤ
+    *p++ = 0xB8;
+    emitImm32(p, static_cast<unsigned int>(reinterpret_cast<uintptr_t>(ctx)));
+    // 读栈槽低 32 位到 edx: disp8 / disp32 两种寻址
+    // Load the low 32 bits of a stack slot into edx: disp8 or disp32 addressing
+    // ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠡᠴᠡ 32 ᠪᠠᠢᠲᠤ ᠢ ᠳᠠᠷᠤᠬᠤ
+    auto emitLoadStack32 = [&](int disp){
+        if (disp <= 127){
+            *p++ = 0x8B; *p++ = 0x54; *p++ = 0x24;
+            *p++ = static_cast<unsigned char>(disp);
+        } else {
+            *p++ = 0x8B; *p++ = 0x94; *p++ = 0x24;
+            emitImm32(p, static_cast<unsigned int>(disp));
+        }
+    };
+    int stackOffset = 4;   // 返回地址之后就是第一个参数
+    int argCount = ctx->argCount;
+    if (argCount > 16) argCount = 16;
+    if (argCount < 0) argCount = 0;
+    for (int i = 0; i < argCount; ++i){
+        int size = ctx->argSizes[i];
+        if (size != 8) size = 4;
+        // 参数在栈上按声明顺序紧密排列, 8 字节参数占连续两个 4 字节槽
+        // Arguments are packed in declaration order; an 8-byte argument spans two 4-byte slots
+        // ᠴᠠᠭᠠᠨ ᠪᠡᠷ ᠲᠡᠭᠰᠢ ᠪᠠᠢᠷᠠᠯᠠᠬᠤ
+        emitLoadStack32(stackOffset);
+        *p++ = 0x89; *p++ = 0x50;
+        *p++ = static_cast<unsigned char>(i * 8);
+        if (size == 8){
+            emitLoadStack32(stackOffset + 4);
+            *p++ = 0x89; *p++ = 0x50;
+            *p++ = static_cast<unsigned char>(i * 8 + 4);
+        }
+        stackOffset += size;
+    }
+    // 先留 8 字节保证调用点 16 字节对齐, 再压 ctx: ctx 必须停在 [esp+4]
+    // Reserve 8 bytes for 16-byte call alignment first, then push ctx so it lands at [esp+4]
+    // ᠡᠬᠢᠯᠡᠳ 8 ᠪᠠᠢᠲᠤ ᠰᠠᠨᠠᠭᠤᠯᠭ᠎ᠠ ᠳᠤ ᠪᠠᠢᠭᠤᠯᠠᠭ᠎ᠠ
+    *p++ = 0x83; *p++ = 0xEC; *p++ = 0x08;
+    *p++ = 0x50;
+    *p++ = 0xB8;
+    emitImm32(p, static_cast<unsigned int>(reinterpret_cast<uintptr_t>(dispatcherFunc)));
+    *p++ = 0xFF; *p++ = 0xD0;
+    *p++ = 0x83; *p++ = 0xC4; *p++ = 0x0C;
+    *p++ = 0xC3;
+#else
+    // 未知架构: 明确降级为不可用
+    // Unknown architecture: explicitly degrade to unavailable
+    // ᠮᠡᠳᠡᠭᠡᠭᠳᠡᠭᠰᠡᠨ ᠦᠭᠡᠢ ᠠᠷᠬᠢᠲᠡᠬᠲᠦᠷ
+    mpFreeExecutable(code, size);
+    return nullptr;
+#endif
 
-    p[0] = 0x48; p[1] = 0x89; p[2] = 0x08;
-    p += 3;
-
-    p[0] = 0x48; p[1] = 0x89; p[2] = 0x50; p[3] = 0x08;
-    p += 4;
-
-    p[0] = 0x4C; p[1] = 0x89; p[2] = 0x40; p[3] = 0x10;
-    p += 4;
-
-    p[0] = 0x4C; p[1] = 0x89; p[2] = 0x48; p[3] = 0x18;
-    p += 4;
-
-    p[0] = 0x48; p[1] = 0x83; p[2] = 0xEC; p[3] = 0x08;
-    p += 4;
-
-    p[0] = 0x48; p[1] = 0x89; p[2] = 0xC1;
-    p += 3;
-
-    p[0] = 0x48; p[1] = 0xB8;
-    memcpy(p + 2, &dispatcherFunc, 8);
-    p += 10;
-
-    p[0] = 0xFF; p[1] = 0xD0;
-    p += 2;
-
-    p[0] = 0x48; p[1] = 0x83; p[2] = 0xC4; p[3] = 0x08;
-    p += 4;
-
-    p[0] = 0xC3;
     ctx->trampolineCode = code;
-    ctx->trampolineSize = 4096;
-    FlushInstructionCache(GetCurrentProcess(), code, 4096);
+    ctx->trampolineSize = size;
+    mpFlushInstructionCache(code, size);
     return code;
+#endif
 }
 
 
@@ -978,6 +1231,14 @@ static bool cfuncTypeStubCall(minipy::vm& vm, minipy::ffi_instance& self,
     ctx->function = func;
     ctx->pythonFuncName = func->name;
     ctx->argCount = static_cast<int>(stub->argTypes.size()) - 1;
+    // 记录每个参数的宽度, 供调度器按类型截断/扩展栈槽中的高位垃圾
+    // Record each parameter's width so the dispatcher can trim garbage high bits of stack slots
+    // ᠲᠤᠰ ᠪᠤᠷᠢ ᠴᠠᠭᠠᠨ ᠤ ᠣᠷᠭᠠᠨ ᠢ ᠲᠣᠭᠲᠠᠭᠠᠬᠤ
+    for (int i = 0; i < ctx->argCount && i < 16; ++i){
+        const std::string& typeName = stub->argTypes[static_cast<size_t>(i) + 1];
+        ctx->argKinds[i] = ctypesArgKind(typeName);
+        ctx->argSizes[i] = ctypesArgSize(typeName);
+    }
     void* dispatcherAddr = reinterpret_cast<void*>(ctypesCallbackDispatcher);
     void* tramp = makeTrampoline(ctx, dispatcherAddr);
     if (!tramp){
@@ -1049,7 +1310,23 @@ minipy::ffilib cffi_ctypes_lib(){
             {"c_int", (void*)dataCInt},
             {"c_void_p", (void*)dataCVoidP},
             {"c_char_p", (void*)dataCCharP},
-            {"c_wchar_p", (void*)dataCWcharP}
+            {"c_wchar_p", (void*)dataCWcharP},
+            {"c_uint", (void*)dataCUInt},
+            {"c_long", (void*)dataCLong},
+            {"c_ulong", (void*)dataCULong},
+            {"c_longlong", (void*)dataCLongLong},
+            {"c_ulonglong", (void*)dataCULongLong},
+            {"c_int64", (void*)dataCInt64},
+            {"c_uint64", (void*)dataCUInt64},
+            {"c_ssize_t", (void*)dataCSsize},
+            {"c_size_t", (void*)dataCSize},
+            {"c_short", (void*)dataCShort},
+            {"c_ushort", (void*)dataCUShort},
+            {"c_byte", (void*)dataCByte},
+            {"c_ubyte", (void*)dataCUByte},
+            {"c_char", (void*)dataCChar},
+            {"c_wchar", (void*)dataCWchar},
+            {"c_bool", (void*)dataCBool}
         },
         {
             {"Structure", structureClass}

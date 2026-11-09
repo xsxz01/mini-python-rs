@@ -2,13 +2,19 @@
 
 <img src="MiniPython.png" alt="MiniPython" width="200" />
 
+<p>
+  <a href="https://www.minipy.site"><img src="https://img.shields.io/badge/官方网站-www.minipy.site-1677ff?style=for-the-badge&logo=googlechrome&logoColor=white" alt="访问官方网站" height="32" /></a>
+  &nbsp;
+  <a href="https://www.minipy.site/docs.html#api"><img src="https://img.shields.io/badge/文档速查-API_双字典查询-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="文档速查" height="32" /></a>
+</p>
+
 # MiniPython
 
 **可以嵌入其他程序，也可以独立运行、不依赖外部 Python 环境的轻量解释器**
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C%2B%2B-20-orange.svg)](https://en.wikipedia.org/wiki/C%2B%2B20)
-[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://github.com/RySoftware/MiniPython)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20HarmonyOS%20%7C%20WASM-lightgrey.svg)](https://github.com/RySoftware/MiniPython)
 
 [English](#english) | [中文](#中文)
 
@@ -20,15 +26,23 @@
 
 ### 项目简介
 
-MiniPython 是一款用 C++20 编写的开源 Python 解释器库。它既可以作为轻量独立解释器运行 `.py` 脚本，也可以通过 C-API 嵌入到任何 C/C++ 宿主程序中，为软件产品注入脚本扩展能力。
+MiniPython 是一款用 C++20 编写的开源、跨平台 Python 解释器库。它既可以作为轻量独立解释器运行 `.py` 脚本，也可以通过 C-API 嵌入到任何 C/C++ 宿主程序中，为软件产品注入脚本扩展能力。
 
 **核心优势：**
 
 - **体积小巧** — 整个核心仅由几十个头源文件组成，编译产物紧凑，适合对二进制体积敏感的场景
 - **零外部依赖** — 核心解释器不依赖任何第三方库，链接即可使用
-- **架构开放** — 内置 FFI 机制，可自由注册原生函数、类和数据，也能装载 `.pyd` / `.dll` 扩展模块
+- **架构开放** — 内置 FFI 机制，可自由注册原生函数、类和数据，也能装载 `.pyd` / `.dll` / `.so` / `.dylib` 扩展模块
 - **开发集成便捷高效** — 统一的 C-API 句柄模型、完整的错误处理、自动引用计数，一行 `#include <MiniPython/minipy.h>` 即可集成
 - **兼容 Python 二进制扩展生态** — 支持加载 `.pyd` 扩展库，能够复用现有的 Python 二进制扩展模块
+- **跨平台** — 统一平台层封装动态库加载、可执行内存、系统错误码、字符编码与路径处理，已覆盖 Windows / Linux / macOS / iOS / Android / HarmonyOS，并可编译到 Emscripten / WASI (WebAssembly)
+
+### 最新更新
+
+- **跨平台支持** — 新增 `platform.hpp` / `platform.cpp`，把 `LoadLibrary`/`dlopen`、`VirtualAlloc`/`mmap`、系统错误码与 UTF-8 转换等平台差异集中到一层
+- **C-API 补全** — 新增反射（`mp_vm_find_class` / `mp_vm_find_function`）、类与动态建类、复数、`bytes`、异常对象、dict 视图、格式化、模式匹配、堆快照等接口
+- **标准库扩充** — 已实现模块从最初 18 个扩展到 70+，新增 `cmath`、`fractions`、`collections`、`enum`、`pickle`、`pathlib`、`unittest` 等
+- **数据类型** — 新增复数 `complex` 与 `bytearray` 支持，`mp_value_kind` 同步新增 `MP_KIND_COMPLEX` / `MP_KIND_BYTES` / `MP_KIND_EXCEPTION`
 
 ### 技术架构
 
@@ -41,6 +55,7 @@ MiniPython 采用经典的三段式编译管线：
 - **lexer** — 将 Python 源码切分为 token 序列，支持字符串、数字、标识符、缩进/f-string 等完整 token 类型
 - **parser** — 递归下降语法分析器，将 token 流编译为内部 IR（`execute_t` 指令序列）
 - **vmware** — 基于寄存器栈混合模型的字节码虚拟机，内置引用计数堆管理器
+- **platform** — 跨平台抽象层，屏蔽动态库加载、可执行内存、错误码与字符编码的平台差异
 
 ### 功能特性
 
@@ -60,15 +75,21 @@ MiniPython 采用经典的三段式编译管线：
 
 #### 数据类型
 
-`None` · `int` · `float` · `bool` · `str` · `bytes` · `list` · `tuple` · `dict` · `range` · `set` · `frozenset` · 切片 · 生成器 · 原生 FFI 对象 · 脚本类实例
+`None` · `int` · `float` · `bool` · `complex` · `str` · `bytes` · `bytearray` · `list` · `tuple` · `dict` · `dict_keys/values/items` 视图 · `range` · `set` · `frozenset` · 切片 · 生成器 · 异常对象 · 原生 FFI 对象 · 脚本类实例
 
 #### 已实现标准库
 
 ```
-builtins   base64    bisect     copy       ctypes
-heapq      itertools json       math       operator
-os         os.path   random     re         statistics
-string     sys       time
+argparse   array      atexit     base64     binascii   bisect     builtins
+calendar   cmath      codecs     collections colorsys  configparser contextvars
+copy       csv        ctypes     difflib    doctest    enum       filecmp
+fnmatch    fractions  gc         getopt     glob       graphlib   heapq
+html       http.cookies imghdr   io         itertools  json      logging
+marshal    math       numbers    operator   optparse   os        os.path
+pathlib    pickle     pprint     profile    queue      random    re
+reprlib    sched      secrets    shutil     sndhdr     statistics string
+struct     sys        tempfile   textwrap   time       timeit    tomllib
+traceback  types      unittest   urllib.parse uuid      warnings  wave
 ```
 
 内置函数覆盖 `abs`、`all`、`any`、`bin`、`bool`、`chr`、`compile`、`dict`、`dir`、`enumerate`、`eval`、`exec`、`filter`、`float`、`format`、`getattr`、`hash`、`int`、`isinstance`、`len`、`list`、`map`、`max`、`min`、`next`、`print`、`range`、`repr`、`sorted`、`str`、`sum`、`tuple`、`type`、`zip`、`__import__` 等八十余个。
@@ -147,16 +168,22 @@ int main(void) {
 | 字节码 | `mp_vm_compile_bytecode` / `mp_vm_load_bytecode` |
 | 模块加载 | `mp_vm_add_module` / `mp_vm_load_pyd` |
 | 全局变量 | `mp_vm_get_global` / `mp_vm_set_global` / `mp_vm_del_global` |
-| 值构造 | `mp_none` / `mp_int` / `mp_float` / `mp_bool` / `mp_str` / `mp_list` / `mp_tuple` / `mp_dict` / `mp_range` |
-| 值读取 | `mp_value_as_int` / `mp_value_as_float` / `mp_value_as_bool` / `mp_value_as_str` |
-| 容器操作 | `mp_seq_append` / `mp_dict_set` / `mp_dict_get` |
-| 调用与运算 | `mp_call` / `mp_call_kw` / `mp_binary` / `mp_unary` |
+| 值构造 | `mp_none` / `mp_int` / `mp_float` / `mp_bool` / `mp_str` / `mp_list` / `mp_tuple` / `mp_dict` / `mp_range` / `mp_complex` / `mp_exception` |
+| 值读取 | `mp_value_as_int` / `mp_value_as_float` / `mp_value_as_bool` / `mp_value_as_str` / `mp_value_as_bytes` / `mp_value_as_complex` |
+| 容器操作 | `mp_seq_append` / `mp_dict_set` / `mp_dict_get` / `mp_dict_items` / `mp_dict_view` / `mp_dict_get_index` |
+| 调用与运算 | `mp_call` / `mp_call_kw` / `mp_call_method` / `mp_binary` / `mp_unary` |
 | 属性与下标 | `mp_getattr` / `mp_setattr` / `mp_getitem` / `mp_setitem` |
+| 反射与类型 | `mp_vm_find_class` / `mp_vm_find_function` / `mp_value_class` / `mp_value_dir_names` / `mp_value_container` |
+| 类与对象 | `mp_make_object` / `mp_create_class` / `mp_bind_method` / `mp_super` |
+| 格式化与匹配 | `mp_apply_format` / `mp_percent_format` / `mp_match_pattern` |
+| 模块与堆 | `mp_vm_has_lib` / `mp_vm_heap_count` / `mp_vm_heap_snapshot` |
 | 迭代 | `mp_iterate` |
 | FFI 扩展 | `mp_lib_new` / `mp_class_new` / `mp_vm_load_lib` |
 | 原生回调 | `mp_ctx_arg` / `mp_ctx_kwarg` / `mp_ctx_vm` / `mp_ctx_self` |
 | 错误处理 | `mp_vm_last_error` / `mp_vm_exception_type` / `mp_vm_save_error` |
 | 引用计数 | `mp_value_retain` / `mp_value_release` |
+
+> `mp_value_kind` 在原有类型之外新增 `MP_KIND_COMPLEX`、`MP_KIND_BYTES`、`MP_KIND_EXCEPTION`。
 
 ### C++ 直接调用（vm 类接口）
 
@@ -383,17 +410,25 @@ def fib(n):
 | 编译执行 | `compile(source)` / `execSource(source)` / `run()` / `usestdlib()` |
 | 字节码 | `compileBytecode(source)` / `setBytecode(bytes)` |
 | 模块加载 | `loadpy(script)` / `loadlib(ffilib)` / `loadpyd(name, bytes)` / `addScriptLibrary(name, script)` |
-| 值构造 | `makeInt` / `makeFloat` / `makeBool` / `makeString` / `makeNone` / `makeList` / `makeTuple` / `makeDict` / `makeRange` |
-| 调用 | `invoke(function, args, self, script, displayName, kwargs)` / `callValue(callee, args)` |
+| 值构造 | `makeInt` / `makeFloat` / `makeBool` / `makeString` / `makeNone` / `makeList` / `makeTuple` / `makeDict` / `makeDictView` / `makeRange` / `makeComplex` / `makeExceptionObject` |
+| 调用 | `invoke(function, args, self, script, displayName, kwargs)` / `callValue(callee, args)` / `makeBoundFunction(fn, self)` |
+| 类与对象 | `createDynamicClass(name, bases, ns)` / `makeObject(class)` / `makeSuper(...)` / `findObjectMethod(obj, name)` |
 | 变量 | `findVariable(name)` / `findVariablePtr(name)` / `setVariable(name, v)` / `removeVariable(name)` |
 | 容器 | `dictFind` / `dictSet` / `dictRemove` / `hashable` / `hashKey` / `applyBinary` / `applyUnary` |
 | 属性下标 | `getAttribute` / `setAttribute` / `deleteAttribute` / `indexValue` / `indexAssign` / `indexDelete` |
-| 字符串转换 | `toString` / `toInt` / `toFloat` / `pythonTypeName` |
+| 反射 | `collectDirNames` / `containerOf` / `matchPattern` / `isSubclassOfBuiltin` / `builtinBaseName` / `getClassOfScriptObject` |
+| 字符串转换 | `toString` / `toInt` / `toFloat` / `pythonTypeName` / `applyFormat` / `percentFormat` |
+| 内存与堆 | `heapObjectCount` / `heapSnapshot` / `refCountOf` |
 | 错误 | `raiseError` / `hasError` / `getLastErr` / `clearErr` |
 
 ### 构建
 
-项目使用 `clang++` 编译器，C++20 标准，无需 CMake。
+项目使用 `clang++` 编译器、C++20 标准，无需 CMake。
+
+- **Windows**：直接运行 `src/Win_64.bat`（或 `Win_32.bat`），脚本会编译 `src/*.cpp` 与 `src/lib/*.cpp`，并用 `llvm-ar` 打包为 `build/minipy.lib`
+- **Linux / macOS / iOS / Android / HarmonyOS / WebAssembly**：用相同的 `clang++ -std=c++20 -O3 -c` 编译同一组源文件，再按平台链接系统库即可（Linux 需额外链接 `-ldl`）
+
+平台差异全部集中在 `src/platform.hpp` / `src/platform.cpp`：动态库加载（`LoadLibrary` / `dlopen`）、可执行内存（`VirtualAlloc` / `mmap`）、系统错误码、UTF-8 字符编码与路径处理。
 
 ### 目录结构
 
@@ -404,8 +439,10 @@ src/
 ├── parser.hpp / .cpp   # 语法分析器
 ├── vmware.hpp / .cpp   # 字节码虚拟机（核心）
 ├── cffi.hpp / .cpp     # FFI 机制
+├── platform.hpp / .cpp # 跨平台抽象层（动态库 / 可执行内存 / 编码）
 ├── minipy_capi.cpp     # C-API 实现
-└── lib/                # 标准库模块（math / json / os / re ...）
+├── Win_64.bat / Win_32.bat  # Windows 构建脚本
+└── lib/                # 标准库模块（70+：math / json / os / re / collections ...）
 ```
 
 ### 许可
@@ -418,15 +455,23 @@ src/
 
 ### Overview
 
-MiniPython is an open-source Python interpreter library written in C++20. It can run `.py` scripts as a lightweight standalone interpreter, or be embedded into any C/C++ host application through a clean C-API to provide scripting extensibility.
+MiniPython is an open-source, cross-platform Python interpreter library written in C++20. It can run `.py` scripts as a lightweight standalone interpreter, or be embedded into any C/C++ host application through a clean C-API to provide scripting extensibility.
 
 **Key Strengths:**
 
 - **Small footprint** — The entire core is just dozens of source files; compiled output is compact, ideal for size-sensitive deployments
 - **Zero external dependencies** — No third-party libraries required for the core interpreter; just link and use
-- **Open architecture** — Built-in FFI lets you freely register native functions, classes, and data; also supports loading `.pyd` / `.dll` extension modules
+- **Open architecture** — Built-in FFI lets you freely register native functions, classes, and data; also supports loading `.pyd` / `.dll` / `.so` / `.dylib` extension modules
 - **Convenient and efficient integration** — Uniform handle model, complete error handling, automatic reference counting; `#include <MiniPython/minipy.h>` is all it takes
 - **Python binary extension ecosystem** — Supports loading `.pyd` extension libraries, reusing existing Python binary extension modules
+- **Cross-platform** — A unified platform layer abstracts dynamic library loading, executable memory, system error codes, text encoding and path handling; covers Windows / Linux / macOS / iOS / Android / HarmonyOS and builds for Emscripten / WASI (WebAssembly)
+
+### Recent Updates
+
+- **Cross-platform support** — New `platform.hpp` / `platform.cpp` centralise platform differences: `LoadLibrary`/`dlopen`, `VirtualAlloc`/`mmap`, OS error codes and UTF-8 conversion
+- **C-API completeness** — Added reflection (`mp_vm_find_class` / `mp_vm_find_function`), classes & dynamic class creation, complex numbers, `bytes`, exception objects, dict views, formatting, pattern matching and heap snapshots
+- **Standard library** — Implemented modules expanded from 18 to 70+, including `cmath`, `fractions`, `collections`, `enum`, `pickle`, `pathlib`, `unittest`, and more
+- **Data types** — Added `complex` and `bytearray`; `mp_value_kind` now reports `MP_KIND_COMPLEX` / `MP_KIND_BYTES` / `MP_KIND_EXCEPTION`
 
 ### Architecture
 
@@ -439,6 +484,7 @@ Source → Lexer → Parser → Bytecode VM
 - **lexer** — Tokenizes Python source into a token stream (strings, numbers, identifiers, indent/f-string, ...)
 - **parser** — Recursive-descent parser that compiles tokens into internal IR (`execute_t` instruction stream)
 - **vmware** — Register-stack hybrid bytecode VM with a reference-counted heap manager
+- **platform** — Cross-platform abstraction for dynamic library loading, executable memory, error codes and text encoding
 
 ### Language Features
 
@@ -456,15 +502,21 @@ Source → Lexer → Parser → Bytecode VM
 
 ### Data Types
 
-`None` · `int` · `float` · `bool` · `str` · `bytes` · `list` · `tuple` · `dict` · `range` · `set` · `frozenset` · slice · generator · native FFI object · script class instance
+`None` · `int` · `float` · `bool` · `complex` · `str` · `bytes` · `bytearray` · `list` · `tuple` · `dict` · `dict_keys/values/items` views · `range` · `set` · `frozenset` · slice · generator · exception object · native FFI object · script class instance
 
 ### Implemented Standard Library
 
 ```
-builtins   base64    bisect     copy       ctypes
-heapq      itertools json       math       operator
-os         os.path   random     re         statistics
-string     sys       time
+argparse   array      atexit     base64     binascii   bisect     builtins
+calendar   cmath      codecs     collections colorsys  configparser contextvars
+copy       csv        ctypes     difflib    doctest    enum       filecmp
+fnmatch    fractions  gc         getopt     glob       graphlib   heapq
+html       http.cookies imghdr   io         itertools  json      logging
+marshal    math       numbers    operator   optparse   os        os.path
+pathlib    pickle     pprint     profile    queue      random    re
+reprlib    sched      secrets    shutil     sndhdr     statistics string
+struct     sys        tempfile   textwrap   time       timeit    tomllib
+traceback  types      unittest   urllib.parse uuid      warnings  wave
 ```
 
 Built-in functions include `abs`, `all`, `any`, `bin`, `bool`, `chr`, `compile`, `dict`, `dir`, `enumerate`, `eval`, `exec`, `filter`, `float`, `format`, `getattr`, `hash`, `int`, `isinstance`, `len`, `list`, `map`, `max`, `min`, `next`, `print`, `range`, `repr`, `sorted`, `str`, `sum`, `tuple`, `type`, `zip`, `__import__`, and many more.
@@ -535,6 +587,17 @@ int main(void) {
     return 0;
 }
 ```
+
+#### C-API families added in this release
+
+- **Reflection / types** — `mp_vm_find_class` / `mp_vm_find_function` / `mp_vm_has_lib` / `mp_value_class` / `mp_value_dir_names` / `mp_value_container`
+- **Classes & objects** — `mp_make_object` / `mp_create_class` / `mp_bind_method` / `mp_call_method` / `mp_super`
+- **Values** — `mp_complex` / `mp_exception` / `mp_value_is_complex` / `mp_value_as_complex` / `mp_value_as_bytes`
+- **Dict views** — `mp_dict_items` / `mp_dict_view` / `mp_dict_get_index`
+- **Formatting & matching** — `mp_apply_format` / `mp_percent_format` / `mp_match_pattern`
+- **Heap** — `mp_vm_heap_count` / `mp_vm_heap_snapshot`
+
+> `mp_value_kind` additionally reports `MP_KIND_COMPLEX`, `MP_KIND_BYTES` and `MP_KIND_EXCEPTION`.
 
 ### Direct C++ Usage (the `vm` class)
 
@@ -752,17 +815,25 @@ def fib(n):
 | Compile & run | `compile(source)` / `execSource(source)` / `run()` / `usestdlib()` |
 | Bytecode | `compileBytecode(source)` / `setBytecode(bytes)` |
 | Modules | `loadpy(script)` / `loadlib(ffilib)` / `loadpyd(name, bytes)` / `addScriptLibrary(name, script)` |
-| Value builders | `makeInt` / `makeFloat` / `makeBool` / `makeString` / `makeNone` / `makeList` / `makeTuple` / `makeDict` / `makeRange` |
-| Invocation | `invoke(function, args, self, script, displayName, kwargs)` / `callValue(callee, args)` |
+| Value builders | `makeInt` / `makeFloat` / `makeBool` / `makeString` / `makeNone` / `makeList` / `makeTuple` / `makeDict` / `makeDictView` / `makeRange` / `makeComplex` / `makeExceptionObject` |
+| Invocation | `invoke(function, args, self, script, displayName, kwargs)` / `callValue(callee, args)` / `makeBoundFunction(fn, self)` |
+| Classes & objects | `createDynamicClass(name, bases, ns)` / `makeObject(class)` / `makeSuper(...)` / `findObjectMethod(obj, name)` |
 | Variables | `findVariable(name)` / `findVariablePtr(name)` / `setVariable(name, v)` / `removeVariable(name)` |
 | Containers & ops | `dictFind` / `dictSet` / `dictRemove` / `hashable` / `hashKey` / `applyBinary` / `applyUnary` |
 | Attr / subscript | `getAttribute` / `setAttribute` / `deleteAttribute` / `indexValue` / `indexAssign` / `indexDelete` |
-| Conversions | `toString` / `toInt` / `toFloat` / `pythonTypeName` |
+| Reflection | `collectDirNames` / `containerOf` / `matchPattern` / `isSubclassOfBuiltin` / `builtinBaseName` / `getClassOfScriptObject` |
+| Conversions | `toString` / `toInt` / `toFloat` / `pythonTypeName` / `applyFormat` / `percentFormat` |
+| Memory & heap | `heapObjectCount` / `heapSnapshot` / `refCountOf` |
 | Errors | `raiseError` / `hasError` / `getLastErr` / `clearErr` |
 
 ### Build
 
 Uses `clang++` with C++20 standard, no CMake required.
+
+- **Windows**: run `src/Win_64.bat` (or `Win_32.bat`); it compiles `src/*.cpp` and `src/lib/*.cpp` and archives them into `build/minipy.lib` with `llvm-ar`
+- **Linux / macOS / iOS / Android / HarmonyOS / WebAssembly**: compile the same source set with `clang++ -std=c++20 -O3 -c` and link the platform system libraries (Linux additionally needs `-ldl`)
+
+All platform differences live in `src/platform.hpp` / `src/platform.cpp`: dynamic library loading (`LoadLibrary` / `dlopen`), executable memory (`VirtualAlloc` / `mmap`), OS error codes, UTF-8 text and path handling.
 
 ### License
 

@@ -3,6 +3,6 @@ members = ["crates/mini-python-rs", "crates/mini-python-demo"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "MIT"

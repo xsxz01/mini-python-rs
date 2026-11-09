@@ -1,19 +1,14 @@
 #include "../cffi.hpp"
+#include "../platform.hpp"
 
 #include <cctype>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
-#include <system_error>
 #include <vector>
 
 namespace minipy {
 
-
-
-
 using namespace minipy;
-namespace fs = std::filesystem;
 
 namespace {
 const char kSep =
@@ -67,6 +62,82 @@ std::string homeDirectory(){
     }
     return "";
 }
+
+// 是否为根成分, 如 "/"、"C:"、"\\server\\share"
+// Test whether a token is a root component such as "/", "C:" or "\\server\\share"
+// ᠦᠨᠳᠦᠰᠦ ᠬᠡᠰᠡᠭ ᠡᠰᠡᠬᠢ ᠶᠢ ᠰᠢᠯᠭᠠᠬᠤ
+bool isRootComponent(const std::string& token){
+    if (token == "/" || token == "\\") return true;
+    if (token.size() >= 2 && token[1] == ':') return true;
+    if (token.size() >= 2 && token[0] == '\\' && token[1] == '\\') return true;
+    return false;
+}
+
+// 把路径拆成根成分与各段名字
+// Split a path into a root component and name segments
+// ᠵᠠᠮ ᠢ ᠦᠰᠦᠭ ᠪᠣᠯᠭ᠎ᠠᠨ ᠰᠠᠯᠭᠠᠬᠤ
+std::vector<std::string> splitComponents(const std::string& path){
+    std::vector<std::string> tokens;
+    size_t i = 0;
+    std::string root;
+#if defined(_WIN32)
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\'){
+        size_t first = path.find_first_of("/\\", 2);
+        if (first != std::string::npos){
+            size_t second = path.find_first_of("/\\", first + 1);
+            if (second != std::string::npos){
+                root = path.substr(0, second);
+                i = second;
+            } else {
+                root = path;
+                i = path.size();
+            }
+        } else {
+            root = path;
+            i = path.size();
+        }
+    } else if (path.size() >= 2 && path[1] == ':'){
+        root = path.substr(0, 2);
+        i = 2;
+        if (i < path.size() && (path[i] == '/' || path[i] == '\\')){
+            root.push_back(path[i]);
+            ++i;
+        }
+    } else if (!path.empty() && (path[0] == '/' || path[0] == '\\')){
+        root = path.substr(0, 1);
+        i = 1;
+    }
+#else
+    if (!path.empty() && path[0] == '/') root = "/";
+#endif
+    if (!root.empty()) tokens.push_back(root);
+    while (i < path.size()){
+        size_t end = i;
+        while (end < path.size() && path[end] != '/' && path[end] != '\\') ++end;
+        if (end > i) tokens.push_back(path.substr(i, end - i));
+        i = end + 1;
+    }
+    return tokens;
+}
+
+// 把根成分与段名字重新拼成路径
+// Join a root component and name segments back into a path
+// ᠨᠢᠭᠡᠳᠦᠭᠰᠡᠨ ᠵᠠᠮ ᠪᠣᠯᠭ᠎ᠠᠬᠤ
+std::string joinComponents(const std::vector<std::string>& tokens){
+    std::string result;
+    for (size_t i = 0; i < tokens.size(); ++i){
+        const std::string& token = tokens[i];
+        if (result.empty() || isRootComponent(token)){
+            result = token;
+            continue;
+        }
+        if (result.back() != '/' && result.back() != '\\' && result.back() != ':'){
+            result.push_back(kSep);
+        }
+        result += token;
+    }
+    return result;
+}
 }
 
 // fn 拼接
@@ -74,15 +145,35 @@ std::string homeDirectory(){
 // fn ᠨᠢᠯᠡᠨ᠎ᠠ
 static value fnJoin(cffi& a){
     if (a.argc() == 0) return a.mkstr("");
-    fs::path result(a.arg_str(0));
+    std::string result = a.arg_str(0);
     for (size_t i = 1; i < a.argc(); ++i){
         std::string part = a.arg_str(i);
         if (part.empty()) continue;
-        fs::path next(part);
-        if (next.is_absolute()) result = next;
-        else result /= next;
+        if (mpIsAbsolutePath(part)){
+            result = part;
+            continue;
+        }
+#if defined(_WIN32)
+        if (part.size() >= 2 && part[0] != '\\' && part[0] != '/' && part[1] == ':'){
+            result = part;
+            continue;
+        }
+        if ((part[0] == '\\' || part[0] == '/') &&
+            !(result.size() >= 2 && result[1] == ':')){
+            result = part;
+            continue;
+        }
+#endif
+        if (result.empty()){
+            result = part;
+            continue;
+        }
+        if (result.back() != '/' && result.back() != '\\' && result.back() != ':'){
+            result.push_back(mpPathSeparator());
+        }
+        result += part;
     }
-    return a.mkstr(result.string());
+    return a.mkstr(result);
 }
 
 // fn 拆分
@@ -137,80 +228,93 @@ static value fnSplitext(cffi& a){
 // fn exists
 // fn Exists
 static value fnExists(cffi& a){
-    std::error_code ec;
-    return a.mkbool(fs::exists(fs::path(a.arg_str(0)), ec));
+    mpFileInfo info;
+    return a.mkbool(mpPathInfo(a.arg_str(0), info) && info.targetExists);
 }
 
 // fn Isfile
 // fn isfile
 // fn Isfile
 static value fnIsfile(cffi& a){
-    std::error_code ec;
-    return a.mkbool(fs::is_regular_file(fs::path(a.arg_str(0)), ec));
+    mpFileInfo info;
+    return a.mkbool(mpPathInfo(a.arg_str(0), info) && info.targetExists && info.isRegularFile);
 }
 
 // fn Isdir
 // fn isdir
 // fn Isdir
 static value fnIsdir(cffi& a){
-    std::error_code ec;
-    return a.mkbool(fs::is_directory(fs::path(a.arg_str(0)), ec));
+    mpFileInfo info;
+    return a.mkbool(mpPathInfo(a.arg_str(0), info) && info.targetExists && info.isDirectory);
 }
 
 // fn Islink
 // fn islink
 // fn Islink
 static value fnIslink(cffi& a){
-    std::error_code ec;
-    return a.mkbool(fs::is_symlink(fs::symlink_status(fs::path(a.arg_str(0)), ec)));
+    mpFileInfo info;
+    return a.mkbool(mpPathInfo(a.arg_str(0), info) && info.isSymlink);
 }
 
 // fn Isabs
 // fn isabs
 // fn Isabs
 static value fnIsabs(cffi& a){
-    return a.mkbool(fs::path(a.arg_str(0)).is_absolute());
+    return a.mkbool(mpIsAbsolutePath(a.arg_str(0)));
 }
 
 // fn Abspath
 // fn abspath
 // fn Abspath
 static value fnAbspath(cffi& a){
-    std::error_code ec;
-    fs::path result = fs::absolute(fs::path(a.arg_str(0)), ec);
-    if (ec) return pathError(a, ec.message());
-    return a.mkstr(result.lexically_normal().string());
+    std::string absolute = mpAbsolutePath(a.arg_str(0));
+    if (absolute.empty()) return pathError(a, "cannot determine absolute path");
+    return a.mkstr(mpNormalizePath(absolute));
 }
 
 // fn Normpath
 // fn normpath
 // fn Normpath
 static value fnNormpath(cffi& a){
-    return a.mkstr(fs::path(a.arg_str(0)).lexically_normal().string());
+    return a.mkstr(mpNormalizePath(a.arg_str(0)));
 }
 
 // fn Getsize
 // fn getsize
 // fn Getsize
 static value fnGetsize(cffi& a){
-    std::error_code ec;
-    auto size = fs::file_size(fs::path(a.arg_str(0)), ec);
-    if (ec) return pathError(a, "No such file or directory: '" + a.arg_str(0) + "'");
-    return a.mkint(static_cast<long long>(size));
+    mpFileInfo info;
+    if (!mpPathInfo(a.arg_str(0), info) || !info.targetExists){
+        return pathError(a, "No such file or directory: '" + a.arg_str(0) + "'");
+    }
+    return a.mkint(info.size);
 }
 
 // fn Relpath
 // fn relpath
 // fn Relpath
 static value fnRelpath(cffi& a){
-    std::error_code ec;
-    fs::path target = fs::absolute(fs::path(a.arg_str(0)), ec);
-    fs::path start = (a.argc() > 1) ? fs::absolute(fs::path(a.arg_str(1)), ec)
-                                    : fs::current_path(ec);
-    if (ec) return pathError(a, ec.message());
-    fs::path result = fs::relative(target, start, ec);
-    if (ec) return pathError(a, ec.message());
-    return a.mkstr(result.string());
+    std::string target = mpNormalizePath(mpAbsolutePath(a.arg_str(0)));
+    std::string start = mpNormalizePath((a.argc() > 1) ? mpAbsolutePath(a.arg_str(1))
+                                                     : mpCurrentDirectory());
+    if (start.empty()) return pathError(a, "cannot determine current directory");
+    std::vector<std::string> targetTokens = splitComponents(target);
+    std::vector<std::string> startTokens = splitComponents(start);
+    if (!targetTokens.empty() && !startTokens.empty() &&
+        isRootComponent(targetTokens[0]) && isRootComponent(startTokens[0]) &&
+        targetTokens[0] != startTokens[0]){
+        return pathError(a, "path is on a different drive: '" + a.arg_str(0) + "'");
+    }
+    size_t index = 0;
+    while (index < targetTokens.size() && index < startTokens.size() &&
+           targetTokens[index] == startTokens[index]){
+        ++index;
+    }
+    std::vector<std::string> result;
+    for (size_t k = index; k < startTokens.size(); ++k) result.push_back("..");
+    for (size_t k = index; k < targetTokens.size(); ++k) result.push_back(targetTokens[k]);
+    if (result.empty()) return a.mkstr(".");
+    return a.mkstr(joinComponents(result));
 }
 
 // fn Commonpath
@@ -223,20 +327,20 @@ static value fnCommonpath(cffi& a){
         a.vm->raiseError("ValueError", "commonpath() arg is an empty sequence");
         return a.none();
     }
-    fs::path result(a.vm->toString(items[0]));
+    std::vector<std::string> common =
+        splitComponents(mpNormalizePath(a.vm->toString(items[0])));
     for (size_t i = 1; i < items.size(); ++i){
-        fs::path next(a.vm->toString(items[i]));
-        fs::path common;
-        auto aIt = result.begin();
-        auto bIt = next.begin();
-        while (aIt != result.end() && bIt != next.end() && *aIt == *bIt){
-            common /= *aIt;
-            ++aIt;
-            ++bIt;
+        std::vector<std::string> tokens =
+            splitComponents(mpNormalizePath(a.vm->toString(items[i])));
+        size_t matched = 0;
+        while (matched < common.size() && matched < tokens.size() &&
+               common[matched] == tokens[matched]){
+            ++matched;
         }
-        result = common;
+        common.resize(matched);
     }
-    return a.mkstr(result.string());
+    if (common.empty()) return a.mkstr("");
+    return a.mkstr(joinComponents(common));
 }
 
 // fn Ismount
@@ -269,10 +373,9 @@ static value fnIsmount(cffi& a){
 // fn samefile
 // fn Samefile
 static value fnSamefile(cffi& a){
-    std::error_code ec;
-    bool same = fs::equivalent(fs::path(a.arg_str(0)), fs::path(a.arg_str(1)), ec);
-    if (ec) return pathError(a, ec.message());
-    return a.mkbool(same);
+    int same = mpEquivalent(a.arg_str(0), a.arg_str(1));
+    if (same < 0) return pathError(a, "No such file or directory");
+    return a.mkbool(same != 0);
 }
 
 // fn Expanduser

@@ -53,6 +53,7 @@ struct ffi_instance{
     value ownedValue;
 
     std::string typeName = "";
+    bool isTypeObject = false;
     dynamic_get dynamicGet = nullptr;
     dynamic_call dynamicCall = nullptr;
 };
@@ -257,6 +258,145 @@ ffilib cffi_copy_lib();
 ffilib cffi_operator_lib();
 // ctypes 模块
 ffilib cffi_ctypes_lib();
+// fnmatch 模块
+ffilib cffi_fnmatch_lib();
+// colorsys 模块
+ffilib cffi_colorsys_lib();
+// html 模块
+ffilib cffi_html_lib();
+// urllib.parse 模块
+ffilib cffi_urllib_parse_lib();
+// calendar 模块
+ffilib cffi_calendar_lib();
+// textwrap 模块
+ffilib cffi_textwrap_lib();
+// graphlib 模块
+ffilib cffi_graphlib_lib();
+// secrets 模块
+ffilib cffi_secrets_lib();
+// reprlib 模块
+ffilib cffi_reprlib_lib();
+// difflib 模块
+ffilib cffi_difflib_lib();
+// getopt 模块
+ffilib cffi_getopt_lib();
+// binascii 模块
+ffilib cffi_binascii_lib();
+// struct 模块
+ffilib cffi_struct_lib();
+// array 模块
+ffilib cffi_array_lib();
+// codecs 模块
+ffilib cffi_codecs_lib();
+// pprint 模块
+ffilib cffi_pprint_lib();
+// csv 模块
+ffilib cffi_csv_lib();
+// configparser 模块
+ffilib cffi_configparser_lib();
+// tomllib 模块
+ffilib cffi_tomllib_lib();
+// io 模块
+ffilib cffi_io_lib();
+// collections 模块
+ffilib cffi_collections_lib();
+// types 模块
+ffilib cffi_types_lib();
+// enum 模块
+ffilib cffi_enum_lib();
+// numbers 模块
+ffilib cffi_numbers_lib();
+// cmath 模块
+ffilib cffi_cmath_lib();
+// fractions 模块
+ffilib cffi_fractions_lib();
+// pathlib 模块
+ffilib cffi_pathlib_lib();
+// glob 模块
+ffilib cffi_glob_lib();
+// filecmp 模块
+ffilib cffi_filecmp_lib();
+// shutil 模块
+ffilib cffi_shutil_lib();
+// tempfile 模块
+ffilib cffi_tempfile_lib();
+// atexit 模块
+ffilib cffi_atexit_lib();
+// gc 模块
+ffilib cffi_gc_lib();
+// warnings 模块
+ffilib cffi_warnings_lib();
+// sched 模块
+ffilib cffi_sched_lib();
+// queue 模块
+ffilib cffi_queue_lib();
+// contextvars 模块
+ffilib cffi_contextvars_lib();
+// timeit 模块
+ffilib cffi_timeit_lib();
+// uuid 模块
+ffilib cffi_uuid_lib();
+// http.cookies 模块
+ffilib cffi_http_cookies_lib();
+// imghdr 模块
+ffilib cffi_imghdr_lib();
+// sndhdr 模块
+ffilib cffi_sndhdr_lib();
+// wave 模块
+ffilib cffi_wave_lib();
+// argparse 模块
+ffilib cffi_argparse_lib();
+// optparse 模块
+ffilib cffi_optparse_lib();
+// logging 模块
+ffilib cffi_logging_lib();
+// traceback 模块
+ffilib cffi_traceback_lib();
+// doctest 模块
+ffilib cffi_doctest_lib();
+// unittest 模块
+ffilib cffi_unittest_lib();
+// profile 模块
+ffilib cffi_profile_lib();
+// pickle 模块
+ffilib cffi_pickle_lib();
+// marshal 模块
+ffilib cffi_marshal_lib();
+
+// VM 结束前执行 atexit 回调
+// Run atexit callbacks before VM shutdown
+// VM ᠭᠠᠷᠤᠯᠳᠤ ᠡᠮᠦᠨ᠎ᠡ atexit ᠠᠶᠢᠯᠳᠠᠭᠤᠯᠬᠤ
+void minipyRunAtexit(vm& v);
+
+// 清理某个 VM 的 atexit 回调表
+// Drop a VM's atexit registry
+// atexit ᠪᠠᠶᠢᠮᠠᠭ᠎ᠠ
+void minipyCleanupAtexit(vm& v);
+
+// 清理某个 VM 的 contextvars 上下文状态
+// Drop a VM's contextvars state
+// contextvars ᠪᠠᠶᠢᠮᠠᠭ᠎ᠠ
+void minipyCleanupContextvars(vm& v);
+
+// 清理某个 VM 的 warnings 状态
+// Drop a VM's warnings state
+// warnings ᠪᠠᠶᠢᠮᠠᠭ᠎ᠠ
+void minipyCleanupWarnings(vm& v);
+
+// 清理某个 VM 的 logging 状态
+// Drop a VM's logging state
+// logging ᠪᠠᠶᠢᠮᠠᠭ᠎ᠠ
+void minipyCleanupLogging(vm& v);
+
+// enum 类体转换钩子: 将 class X(Enum) 的类属性转为枚举成员
+// Enum class-body transform hook: turn class attrs into enum members
+// enum ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠶᠢᠨ ᠬᠤᠪᠢᠷᠠᠭᠤᠯᠭ᠎ᠠ
+bool applyEnumTransform(vm& v, class_t& klass);
+
+// 枚举类调用: Color(1) → 按值查找成员
+// Enum class call: Color(1) → lookup member by value
+// enum ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠶᠢᠨ ᠳᠤᠭᠤᠳᠠᠯᠭ᠎ᠠ
+value enumClassCall(vm& v, class_t& klass, const std::vector<value>& args);
 
 
 

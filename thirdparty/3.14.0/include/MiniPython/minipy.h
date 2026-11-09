@@ -81,6 +81,7 @@ SOFTWARE.
 #include "parser.hpp"
 #include "vmware.hpp"
 #include "cffi.hpp"
+#include "platform.hpp"
 #endif
 
 // Windows 下把链接栈调到 64MB, 避免深递归溢出
@@ -145,6 +146,9 @@ extern "C" {
 #define MP_KIND_FUNC   10   // 函数 / 绑定方法 / function, bound method
 #define MP_KIND_MODULE 11   // 模块字典 / module dict
 #define MP_KIND_OTHER  12   // 其它 (生成器/切片/...)
+#define MP_KIND_COMPLEX 13  // 复数 / complex
+#define MP_KIND_BYTES 14    // bytes / bytearray
+#define MP_KIND_EXCEPTION 15 // 异常对象 / exception object
 
 // 原生函数回调: user 为注册时透传的数据, ctx 为回调上下文 (用 mp_ctx_* 读写),
 // 成功时把新句柄写入 *out 并返回 MP_OK, 失败返回非 MP_OK。
@@ -270,6 +274,24 @@ int       mp_vm_del_global(void* vm, const char* name);
 int       mp_vm_global_names(void* vm, char*** names, size_t* count);
 void      mp_free_names(char** names, size_t count);
 
+// ---- 反射 / Introspection ----
+// 在脚本中查找类 / 函数, 返回非持有句柄 (释放句柄即可, 不会销毁定义)
+// Find a script class / function; returns a non-owning handle
+// ᠰᠢᠯᠭᠠᠨ ᠡᠴᠡ ᠬᠠᠯᠠᠬᠤ
+int       mp_vm_find_class(void* vm, const char* name, void** out);
+int       mp_vm_find_function(void* vm, const char* name, void** out);
+
+// 是否已装载某个 FFI / 脚本模块 (1/0)
+// Whether an FFI or script module is loaded (1/0)
+// ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠶᠤᠤ
+int       mp_vm_has_lib(void* vm, const char* name);
+
+// 堆对象统计 / 快照 (快照数组用 mp_value_array_free 释放)
+// Heap object count / snapshot (free array with mp_value_array_free)
+// ᠭᠡᠷ ᠲᠤ ᠪᠠᠶᠢᠨᠠᠳ᠋ᠣᠭᠰᠣᠨ ᠲᠣᠭ᠎ᠠ
+int       mp_vm_heap_count(void* vm, long long* out_count);
+int       mp_vm_heap_snapshot(void* vm, void*** out, size_t* out_count);
+
 // ================= 2. 构造值 / Value builders =================
 // 以下工厂返回新句柄, 调用方负责 mp_value_release
 // Builders return a new caller-owned handle
@@ -285,6 +307,31 @@ void* mp_tuple(void* vm);
 void* mp_dict(void* vm);
 void* mp_range(void* vm, long long start, long long stop, long long step);
 
+// 由键值句柄数组构造字典 / 构造 dict_keys(0) / dict_values(1) / dict_items(2) 视图
+// Build a dict from key/value handle arrays / build a dict view (kind 0/1/2)
+// ᠲᠣᠭᠲᠠᠭᠤᠯᠭ᠎ᠠ / ᠦᠶᠢᠯᠳᠡᠯ ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+void* mp_dict_items(void* vm, void** keys, void** values, size_t count);
+void* mp_dict_view(void* vm, void* dict, int kind);
+
+// 复数 / 异常对象 / super 代理
+// Complex value / exception object / super proxy
+// ᠰᠢᠯᠢ ᠲᠣ᠎ / ᠬᠠᠯᠳᠠᠭᠤᠯᠭ᠎ᠠ / super
+void* mp_complex(void* vm, double real, double imag);
+void* mp_exception(void* vm, const char* type, const char* message);
+void* mp_super(void* vm, void* klass, void* obj);
+
+// 用脚本类句柄构造实例 / 动态建类 (等价 type(name, bases, namespace))
+// Build an instance from a script class handle / dynamic class creation
+// ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠶᠢᠨ ᠶᠢᠨᠢᠰ / ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+void* mp_make_object(void* vm, void* klass);
+void* mp_create_class(void* vm, const char* name, void** bases,
+                      size_t base_count, void* namespace_dict);
+
+// 把脚本对象上的方法绑定为可直接调用的句柄 (仅脚本对象/类)
+// Bind a script-object method into a directly callable handle
+// ᠠᠷᠭᠠ ᠢ ᠬᠣᠯᠪᠣᠭᠤᠯᠬᠤ
+void* mp_bind_method(void* vm, void* obj, const char* name);
+
 // 容器原地修改 / In-place container mutation
 // ᠲᠠᠯᠠᠭ᠌ ᠢ ᠵᠠᠰᠠᠬᠤ
 int   mp_seq_len(void* seq, size_t* out_len);
@@ -296,6 +343,11 @@ int   mp_dict_len(void* dict, size_t* out_len);
 int   mp_dict_get(void* dict, void* key, void** out);
 int   mp_dict_set(void* dict, void* key, void* value);
 int   mp_dict_del(void* dict, void* key);
+
+// 按顺序读取第 index 个键 / 值 (dict 及三种视图均可)
+// Read the index-th key / value pair in order (works for dict and its views)
+// ᠳᠤᠭ᠎ᠠ ᠪᠡᠷ ᠬᠠᠯᠠᠬᠤ
+int   mp_dict_get_index(void* dict, size_t index, void** out_key, void** out_value);
 
 // 引用计数: 返回同一句柄 (便于链式使用), release 后句柄失效
 // Refcount on the handle: retain returns the same handle, release invalidates it
@@ -320,6 +372,29 @@ double      mp_value_as_float(void* value);
 int         mp_value_as_bool(void* value);
 const char* mp_value_as_str(void* value);
 const char* mp_value_as_str_n(void* value, size_t* out_len);
+
+// 复数读写 (成功返回 1 / 0) / bytes、bytearray 读取 (失败返回 NULL)
+// Complex read/write (1/0) / bytes & bytearray reads (NULL on failure)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ / bytes ᠬᠠᠯᠠᠬᠤ
+int         mp_value_is_complex(void* value);
+int         mp_value_as_complex(void* value, double* real, double* imag);
+const char* mp_value_as_bytes(void* value, size_t* out_len);
+
+// 取值的类型对象: class 原样返回, 脚本对象返回其所属类,
+// 内置值返回内置类型对象 (native_object, 如 int/list); 未知返回 NULL
+// Type object of a value (class itself / script class / builtin type object)
+// ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠬᠠᠯᠠᠬᠤ
+void*       mp_value_class(void* value);
+
+// dir(obj) 名字列表 (char** 用 mp_free_names 释放)
+// dir(obj) name list (free with mp_free_names)
+// dir() ᠶᠢᠨ ᠨᠡᠷᠡ ᠵᠢᠰᠢᠶ᠎ᠡ
+int         mp_value_dir_names(void* value, char*** names, size_t* count);
+
+// 取值的容器基类 (dict/list/tuple; 无则 NULL, 返回新句柄)
+// Get the container base of a value (dict/list/tuple; NULL otherwise)
+// ᠦᠮᠢᠰᠢ ᠬᠠᠯᠠᠬᠤ
+void*       mp_value_container(void* value);
 
 // 判等 / 比较 / 哈希 (compare 返回 <0, 0, >0)
 // Equality / ordering / hash
@@ -395,6 +470,30 @@ int   mp_isinstance(void* vm, void* obj, void* cls);
 // Get a builtin type object (NULL when unknown)
 // ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ
 void* mp_builtin_type(void* vm, const char* type_name);
+
+// 按名调用对象方法 (等价于 getattr(obj, name)(*args))
+// Call an object method by name (getattr(obj, name)(*args))
+// ᠠᠷᠭᠠ ᠨᠡᠷᠡᠷ ᠢᠶᠡᠨ ᠬᠠᠯᠠᠬᠤ
+void* mp_call_method(void* vm, void* obj, const char* name, void** args, size_t argc);
+
+// format(value, spec) / printf 风格 % 格式化
+// format(value, spec) / printf-style % formatting
+// format / % ᠬᠡᠪᠡᠷᠢᠶ᠎ᠡᠷᠢᠶᠡᠨ᠎ᠠ
+void* mp_apply_format(void* vm, void* value, const char* spec);
+void* mp_percent_format(void* vm, void* format, void* arg);
+
+// 判断是否继承自某个内置基类 (1/0) / 取脚本类的内置基类名 (非脚本类返回 "")
+// Whether a class inherits a builtin base (1/0) / builtin base name of a script class
+// ᠡᠪᠦᠭ ᠰᠢᠯᠭᠠᠬᠤ / ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠰᠢᠨ᠎ᠡ
+int         mp_is_subclass_of(void* vm, void* sub, const char* builtin_name);
+const char* mp_builtin_base_name(void* vm, void* klass);
+
+// 模式匹配 (pattern 为内部 IR 文本); 命中返回 1, 未命中 0, 出错 -1;
+// *captures_out 收到捕获名字 -> 值的 dict 句柄 (可为 NULL)
+// Pattern match on internal IR text; 1 hit, 0 miss, -1 error
+// ᠬᠡᠯᠪᠡᠷᠢ ᠲᠠᠭᠠᠷᠤᠯᠳᠤ
+int         mp_match_pattern(void* vm, void* subject, const char* pattern,
+                             void** captures_out);
 
 // ================= 5. 扩展注册 / Extension (FFI) =================
 // 创建一个空 FFI 库描述

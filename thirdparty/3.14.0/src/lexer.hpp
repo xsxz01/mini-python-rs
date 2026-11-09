@@ -31,6 +31,7 @@ struct token{
     int line = 0;
     int col = 0;
     int endCol = 0;
+    bool bytes = false;
 };
 
 

@@ -1,9 +1,7 @@
 #include "../cffi.hpp"
+#include "../platform.hpp"
 
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
 #include <io.h>
 #else
 #include <sys/stat.h>
@@ -11,10 +9,7 @@
 #endif
 
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <string>
-#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -24,7 +19,6 @@ namespace minipy {
 
 
 using namespace minipy;
-namespace fs = std::filesystem;
 
 namespace {
 
@@ -44,20 +38,6 @@ value fileNotFoundError(cffi& a, const std::string& message){
     return a.none();
 }
 #if defined(_WIN32)
-
-// wide 转 Utf8
-// wide to utf8
-// wide ᠬᠡᠪᠡᠷᠢᠶ᠎ᠡᠷᠢᠶᠡᠨ᠎ᠠ Utf8
-std::string wideToUtf8(const std::wstring& text){
-    if (text.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
-                                  nullptr, 0, nullptr, nullptr);
-    if (len <= 0) return "";
-    std::string result(static_cast<size_t>(len), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
-                        result.data(), len, nullptr, nullptr);
-    return result;
-}
 
 // file Time Seconds
 // file time seconds
@@ -111,25 +91,89 @@ void walkInto(cffi& a, const std::wstring& dirPath, std::vector<value>& out){
     }
 }
 #endif
+
+// 逐级创建目录, 返回 1 新建, 0 全部已存在, -1 失败
+// Create directory levels one by one: 1 created, 0 all existed, -1 failure
+// ᠵᠡᠷᠭᠡ ᠵᠡᠷᠭᠡᠪᠡᠷ ᠭᠠᠵᠠᠷ ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+int makeDirectoryLevels(const std::string& path){
+    if (path.empty()) return -1;
+    std::string current;
+    size_t i = 0;
+#if defined(_WIN32)
+    if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\'){
+        size_t first = path.find_first_of("/\\", 2);
+        if (first == std::string::npos) return 0;
+        size_t second = path.find_first_of("/\\", first + 1);
+        if (second == std::string::npos) return 0;
+        current = path.substr(0, second);
+        i = second + 1;
+    } else if (path.size() >= 2 && path[1] == ':'){
+        current = path.substr(0, 2);
+        i = 2;
+        if (i < path.size() && (path[i] == '/' || path[i] == '\\')){
+            current += '\\';
+            ++i;
+        }
+    } else if (path[0] == '/' || path[0] == '\\'){
+        current += '\\';
+        i = 1;
+    }
+#else
+    if (path[0] == '/'){
+        current = "/";
+        i = 1;
+    }
+#endif
+    int created = 0;
+    while (i < path.size()){
+        size_t end = i;
+        while (end < path.size() && path[end] != '/' && path[end] != '\\') ++end;
+        if (end > i){
+            if (!current.empty() && current.back() != '/' && current.back() != '\\'){
+                current.push_back(mpPathSeparator());
+            }
+            current += path.substr(i, end - i);
+            int result = mpCreateDirectory(current);
+            if (result < 0) return -1;
+            if (result > 0) created = 1;
+        }
+        i = end + 1;
+    }
+    return created;
+}
+}
+
+// fn Close fd
+// fn close
+// fn Close
+static value fnClose(cffi& a){
+    long long fd = a.arg_int(0);
+#if defined(_WIN32)
+    if (_close(static_cast<int>(fd)) != 0)
+        return osError(a, "close failed");
+#else
+    if (::close(static_cast<int>(fd)) != 0)
+        return osError(a, "close failed");
+#endif
+    return a.none();
 }
 
 // fn Getcwd
 // fn getcwd
 // fn Getcwd
 static value fnGetcwd(cffi& a){
-    std::error_code ec;
-    fs::path current = fs::current_path(ec);
-    if (ec) return osError(a, ec.message());
-    return a.mkstr(current.string());
+    std::string current = mpCurrentDirectory();
+    if (current.empty()) return osError(a, "cannot determine current directory");
+    return a.mkstr(current);
 }
 
 // fn Chdir
 // fn chdir
 // fn Chdir
 static value fnChdir(cffi& a){
-    std::error_code ec;
-    fs::current_path(fs::path(a.arg_str(0)), ec);
-    if (ec) return osError(a, ec.message());
+    if (!mpSetCurrentDirectory(a.arg_str(0))){
+        return osError(a, "cannot change directory to '" + a.arg_str(0) + "'");
+    }
     return a.none();
 }
 
@@ -137,22 +181,16 @@ static value fnChdir(cffi& a){
 // fn listdir
 // fn Listdir
 static value fnListdir(cffi& a){
-    std::error_code ec;
-    fs::path dir;
-    if (a.argc() > 0){
-        dir = fs::path(a.arg_str(0));
-    } else {
-        dir = fs::current_path(ec);
-        if (ec) return osError(a, ec.message());
-    }
-    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)){
-        return osError(a, "No such file or directory: '" + dir.string() + "'");
+    std::string dir = (a.argc() > 0) ? a.arg_str(0) : mpCurrentDirectory();
+    if (dir.empty()) return osError(a, "cannot determine current directory");
+    mpFileInfo info;
+    if (!mpPathInfo(dir, info) || !info.isDirectory){
+        return osError(a, "No such file or directory: '" + dir + "'");
     }
     std::vector<value> items;
-    for (const auto& entry : fs::directory_iterator(dir, ec)){
-        items.push_back(a.mkstr(entry.path().filename().string()));
+    for (const auto& entry : mpListDirectory(dir)){
+        items.push_back(a.mkstr(entry.name));
     }
-    if (ec) return osError(a, ec.message());
     return a.mklist(items);
 }
 
@@ -160,9 +198,10 @@ static value fnListdir(cffi& a){
 // fn mkdir
 // fn Mkdir
 static value fnMkdir(cffi& a){
-    std::error_code ec;
-    fs::create_directory(fs::path(a.arg_str(0)), ec);
-    if (ec) return osError(a, ec.message());
+    std::string path = a.arg_str(0);
+    if (mpCreateDirectory(path) < 0){
+        return osError(a, "cannot create directory '" + path + "'");
+    }
     return a.none();
 }
 
@@ -170,9 +209,10 @@ static value fnMkdir(cffi& a){
 // fn makedirs
 // fn Makedirs
 static value fnMakedirs(cffi& a){
-    std::error_code ec;
-    fs::create_directories(fs::path(a.arg_str(0)), ec);
-    if (ec) return osError(a, ec.message());
+    std::string path = a.arg_str(0);
+    if (makeDirectoryLevels(path) < 0){
+        return osError(a, "cannot create directory '" + path + "'");
+    }
     return a.none();
 }
 
@@ -180,9 +220,10 @@ static value fnMakedirs(cffi& a){
 // fn rmdir
 // fn Rmdir
 static value fnRmdir(cffi& a){
-    std::error_code ec;
-    fs::remove(fs::path(a.arg_str(0)), ec);
-    if (ec) return osError(a, ec.message());
+    std::string path = a.arg_str(0);
+    if (!mpRemoveDirectory(path)){
+        return osError(a, "cannot remove directory '" + path + "'");
+    }
     return a.none();
 }
 
@@ -190,9 +231,17 @@ static value fnRmdir(cffi& a){
 // fn remove
 // fn ᠬᠠᠯᠠᠬᠤ
 static value fnRemove(cffi& a){
-    std::error_code ec;
-    fs::remove(fs::path(a.arg_str(0)), ec);
-    if (ec) return osError(a, ec.message());
+    std::string path = a.arg_str(0);
+    mpFileInfo info;
+    if (mpPathInfo(path, info) && info.isDirectory && !info.isSymlink){
+        if (!mpRemoveDirectory(path)){
+            return osError(a, "cannot remove directory '" + path + "'");
+        }
+        return a.none();
+    }
+    if (!mpRemoveFile(path)){
+        return osError(a, "cannot remove file '" + path + "'");
+    }
     return a.none();
 }
 
@@ -200,9 +249,11 @@ static value fnRemove(cffi& a){
 // fn rename
 // fn Rename
 static value fnRename(cffi& a){
-    std::error_code ec;
-    fs::rename(fs::path(a.arg_str(0)), fs::path(a.arg_str(1)), ec);
-    if (ec) return osError(a, ec.message());
+    std::string from = a.arg_str(0);
+    std::string to = a.arg_str(1);
+    if (!mpMoveFile(from, to)){
+        return osError(a, "cannot rename '" + from + "' to '" + to + "'");
+    }
     return a.none();
 }
 
@@ -235,8 +286,16 @@ static value fnPutenv(cffi& a){
 // fn system
 // fn System
 static value fnSystem(cffi& a){
+#if defined(__wasi__)
+    // WASI 无子进程能力, 始终返回失败
+    // WASI has no subprocess support, always report failure
+    // WASI ᠳᠤ ᠬᠤᠪᠢᠰᠤᠨ ᠠᠵᠢᠯᠤᠨ ᠦ ᠴᠠᠳᠠᠯ ᠦᠭᠡᠢ
+    (void)a.arg_str(0);
+    return a.mkint(-1);
+#else
     int result = std::system(a.arg_str(0).c_str());
     return a.mkint(result);
+#endif
 }
 
 // fn Cpu Count
@@ -262,36 +321,37 @@ static value fnWalk(cffi& a){
     walkInto(a, wide, items);
     return a.mklist(items);
 #else
-    std::error_code ec;
-    fs::path top(a.arg_str(0));
-    if (!fs::is_directory(top, ec)){
-        return fileNotFoundError(a, "No such file or directory: '" + a.arg_str(0) + "'");
+    std::string top = a.arg_str(0);
+    mpFileInfo info;
+    if (!mpPathInfo(top, info) || !info.isDirectory){
+        return fileNotFoundError(a, "No such file or directory: '" + top + "'");
     }
     std::vector<value> items;
-    std::vector<fs::path> pending;
+    std::vector<std::string> pending;
     pending.push_back(top);
     while (!pending.empty()){
-        fs::path dirPath = pending.back();
+        std::string dirPath = pending.back();
         pending.pop_back();
         std::vector<value> dirNames;
         std::vector<value> fileNames;
-        std::vector<fs::path> subDirs;
-        fs::directory_iterator it(dirPath, ec);
-        if (ec) continue;
-        for (; it != fs::directory_iterator(); it.increment(ec)){
-            if (ec) break;
-            fs::path entry = it->path();
-            std::string name = entry.filename().string();
-            std::error_code typeEc;
-            if (fs::is_directory(entry, typeEc)){
-                dirNames.push_back(a.mkstr(name));
-                if (!fs::is_symlink(entry, typeEc)) subDirs.push_back(entry);
+        std::vector<std::string> subDirs;
+        for (const auto& entry : mpListDirectory(dirPath)){
+            if (entry.isDirectory){
+                dirNames.push_back(a.mkstr(entry.name));
+                if (!entry.isSymlink){
+                    std::string child = dirPath;
+                    if (!child.empty() && child.back() != '/' && child.back() != '\\'){
+                        child.push_back(mpPathSeparator());
+                    }
+                    child += entry.name;
+                    subDirs.push_back(child);
+                }
             } else {
-                fileNames.push_back(a.mkstr(name));
+                fileNames.push_back(a.mkstr(entry.name));
             }
         }
         items.push_back(a.vm->makeTuple(
-            {a.mkstr(dirPath.string()), a.mklist(dirNames), a.mklist(fileNames)}));
+            {a.mkstr(dirPath), a.mklist(dirNames), a.mklist(fileNames)}));
         for (const auto& sub : subDirs) pending.push_back(sub);
     }
     return a.mklist(items);
@@ -304,6 +364,11 @@ static value fnWalk(cffi& a){
 static value fnGetpid(cffi& a){
 #if defined(_WIN32)
     return a.mkint(static_cast<long long>(GetCurrentProcessId()));
+#elif defined(__wasi__)
+    // WASI 无进程标识, 固定返回 0
+    // WASI has no process id, always report 0
+    // WASI ᠳᠤ ᠭᠠᠷᠠᠭ ᠤᠨ ᠳᠤᠭ᠎ᠠ ᠦᠭᠡᠢ
+    return a.mkint(0);
 #else
     return a.mkint(static_cast<long long>(::getpid()));
 #endif
@@ -350,6 +415,12 @@ static value fnAccess(cffi& a){
     int crtMode = static_cast<int>(mode & 6);
     if (crtMode == 0) return a.mkbool(true);
     return a.mkbool(_waccess(wide.c_str(), crtMode) == 0);
+#elif defined(__wasi__)
+    // WASI 无权限位概念, 按路径是否存在判断
+    // WASI has no permission bits, report based on existence
+    // WASI ᠳᠤ ᠡᠷᠬᠡ ᠦᠢᠯᠡᠳᠦᠯ ᠦᠭᠡᠢ
+    mpFileInfo info;
+    return a.mkbool(mpPathInfo(path, info) && info.targetExists);
 #else
     return a.mkbool(::access(path.c_str(), static_cast<int>(mode)) == 0);
 #endif
@@ -504,6 +575,7 @@ ffilib cffi_os_lib(){
             {"replace", (void*)fnRename},
             {"walk", (void*)fnWalk},
             {"getpid", (void*)fnGetpid},
+            {"close", (void*)fnClose},
             {"urandom", (void*)fnUrandom},
             {"access", (void*)fnAccess},
             {"stat", (void*)fnStat},

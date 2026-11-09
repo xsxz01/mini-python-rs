@@ -8,24 +8,40 @@
 
 ## Features
 
-- Create and manage a MiniPython VM.
-- Execute source and read/write string globals.
-- Register MiniPython source modules.
-- Expose statically linked Rust functions as importable modules.
-- Pass `None`, integers, floats, booleans, and strings across callbacks.
-- Catch Rust panics and return callback errors to MiniPython.
+- Create and manage a MiniPython VM; execute source, load source in stages, and compile/load bytecode.
+- Access globals, class/function reflection, calls, operators, attributes, containers, iteration, and formatting.
+- `ffi` exposes the complete raw C API from upstream `minipy.h`; `Interpreter::as_raw()` interoperates with it.
+- Register MiniPython source modules and Rust native functions, data, classes, and objects.
+- Rust callbacks support `None`, integers, floats, booleans, strings, complex values, and bytes/bytearray.
+- The `cross-platform` Cargo feature is enabled by default and exposes Rust `platform::Target` metadata; the C++ platform layer is always compiled.
+- Catch Rust panics so they do not cross the C ABI.
 
 ## Requirements
 
 - Rust 1.85 or newer (edition 2024).
-- A C++17 compiler and native build tools required by Cargo's `cc` crate.
-- Verified on Windows with MSVC. The bundled `ctypes` implementation uses Windows APIs; other targets depend on upstream C++ portability.
+- A C++20 compiler and target-native build tools required by Cargo's `cc` crate.
+- WebAssembly targets require a C/C++ sysroot and linker matching the target ABI; this repository has not validated a wasm build.
+- Upstream platform abstractions cover Windows, Linux, macOS, iOS, Android, HarmonyOS, and Emscripten/WASI. This repository is currently verified on Windows with MSVC; other targets still require target-specific validation.
+
+## Cross-platform Cargo feature
+
+`cross-platform` is enabled by default. A dependency may opt in explicitly:
+
+```toml
+mini-python-rs = { version = "0.1.3", features = ["cross-platform"] }
+```
+
+The feature enables the Rust `mini_python_rs::platform::Target` API. The upstream C++ platform layer is required by the interpreter and remains compiled even with `default-features = false`; disabling the feature only hides the Rust target-metadata API and does not restore the old Windows-only implementation.
+
+## Complete upstream C API
+
+`mini_python_rs::ffi` exposes every C API function, status code, and value-kind constant declared in `minipy.h`. It is a raw `unsafe` interface: callers must follow upstream handle ownership, release ordering, and single-thread-per-VM requirements. `Interpreter::as_raw()` returns a borrowed VM pointer; never free it or use it after the interpreter is dropped.
 
 ## Install
 
 ```toml
 [dependencies]
-mini-python-rs = "0.1.2"
+mini-python-rs = "0.1.3"
 ```
 
 ## Execute source
@@ -61,7 +77,7 @@ fn main() -> Result<(), String> {
 }
 ```
 
-Closures registered through `NativeModule::function` are retained by their `Interpreter`. Callback inputs and results use `NativeValue::{None, Integer, Float, Boolean, String}`. Returning `Err(String)` raises a MiniPython `RuntimeError`; Rust panics are caught at the callback boundary.
+Closures registered through `NativeModule::function` are retained by their `Interpreter`. `NativeValue` supports `None`, integers, floats, booleans, strings, complex values, and bytes/bytearray. Lists, dictionaries, exceptions, and arbitrary script objects remain available through the raw `ffi` module. Returning `Err(String)` raises a MiniPython `RuntimeError`; Rust panics are caught at the callback boundary.
 
 Each interpreter must be used from one thread at a time, as required by MiniPython.
 

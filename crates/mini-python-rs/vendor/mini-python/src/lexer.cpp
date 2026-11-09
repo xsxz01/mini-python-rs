@@ -39,7 +39,7 @@ void appendUtf8(std::string& out, unsigned int cp){
 // decode Escape
 // decode escape
 // decode Escape
-bool decodeEscape(const std::string& code, size_t& pos, std::string& body){
+bool decodeEscape(const std::string& code, size_t& pos, std::string& body, bool isBytes = false){
     size_t n = code.size();
     if (pos + 1 >= n){ body += '\\'; pos++; return true; }
     char esc = code[pos + 1];
@@ -66,7 +66,8 @@ bool decodeEscape(const std::string& code, size_t& pos, std::string& body){
             if (pos + 3 < n){
                 int a = hexVal(code[pos + 2]), b = hexVal(code[pos + 3]);
                 if (a >= 0 && b >= 0){
-                    appendUtf8(body, static_cast<unsigned int>(a * 16 + b));
+                    if (isBytes) body.push_back(static_cast<char>(a * 16 + b));
+                    else appendUtf8(body, static_cast<unsigned int>(a * 16 + b));
                     pos += 4;
                     return true;
                 }
@@ -76,7 +77,7 @@ bool decodeEscape(const std::string& code, size_t& pos, std::string& body){
             return true;
         }
         case 'u': {
-            if (pos + 5 < n){
+            if (!isBytes && pos + 5 < n){
                 unsigned int cp = 0;
                 bool ok = true;
                 for (int i = 2; i <= 5; ++i){
@@ -91,7 +92,7 @@ bool decodeEscape(const std::string& code, size_t& pos, std::string& body){
             return true;
         }
         case 'U': {
-            if (pos + 9 < n){
+            if (!isBytes && pos + 9 < n){
                 unsigned int cp = 0;
                 bool ok = true;
                 for (int i = 2; i <= 9; ++i){
@@ -114,7 +115,8 @@ bool decodeEscape(const std::string& code, size_t& pos, std::string& body){
                     cp = cp * 8 + static_cast<unsigned int>(code[pos + k] - '0');
                     k++;
                 }
-                appendUtf8(body, cp);
+                if (isBytes) body.push_back(static_cast<char>(cp & 0xFF));
+                else appendUtf8(body, cp);
                 pos += k;
                 return true;
             }
@@ -341,7 +343,7 @@ std::vector<token> minipyGetTokens(std::string code){
 
                 if (!rawStr && code[pos] == '\\' && pos + 1 < code.size()){
                     size_t before = pos;
-                    decodeEscape(code, pos, body);
+                    decodeEscape(code, pos, body, bytesStr);
                     curCol += static_cast<int>(pos - before);
                     continue;
                 }
@@ -378,6 +380,7 @@ std::vector<token> minipyGetTokens(std::string code){
             tk.line = quoteLine;
             tk.col = quoteCol;
             tk.endCol = endCol > 0 ? endCol : quoteCol + 3;
+            tk.bytes = bytesStr;
             tokens.push_back(tk);
 
 
@@ -403,7 +406,7 @@ std::vector<token> minipyGetTokens(std::string code){
                 char cc = code[pos];
                 if (!rawStr && cc == '\\' && pos + 1 < code.size()){
                     size_t before = pos;
-                    decodeEscape(code, pos, body);
+                    decodeEscape(code, pos, body, bytesStr);
                     curCol += static_cast<int>(pos - before);
                     continue;
                 }
@@ -425,6 +428,7 @@ std::vector<token> minipyGetTokens(std::string code){
             tk.line = quoteLine;
             tk.col = quoteCol;
             tk.endCol = curCol - 1;
+            tk.bytes = bytesStr;
             tokens.push_back(tk);
             valueStartCol = curCol;
             continue;

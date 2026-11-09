@@ -1,4 +1,5 @@
 #include "../cffi.hpp"
+#include "../platform.hpp"
 
 #include <cstdlib>
 #include <vector>
@@ -13,7 +14,7 @@ using namespace minipy;
 // data Version
 // data version
 // data Version
-static value dataVersion(cffi& a){ return a.mkstr("1.0.3 MiniPython (ᠮᠢᠨᠢ ᠫᠢᠲ᠋ᠢᠣᠨ Portable Python<3.14.0>)"); }
+static value dataVersion(cffi& a){ return a.mkstr("1.0.4 MiniPython (ᠮᠢᠨᠢ ᠫᠢᠲ᠋ᠢᠣᠨ Portable Python<3.14.0>)"); }
 
 // data Version Info
 // data version info
@@ -26,9 +27,15 @@ static value dataVersionInfo(cffi& a){
 // data platform
 // data Platform
 static value dataPlatform(cffi& a){
-#if defined(_WIN32)
+#if defined(MINIPY_OS_WINDOWS)
     return a.mkstr("win32");
-#elif defined(__APPLE__)
+#elif defined(MINIPY_OS_EMSCRIPTEN)
+    return a.mkstr("emscripten");
+#elif defined(MINIPY_OS_WASI)
+    return a.mkstr("wasi");
+#elif defined(MINIPY_OS_IOS)
+    return a.mkstr("ios");
+#elif defined(MINIPY_OS_MACOS)
     return a.mkstr("darwin");
 #else
     return a.mkstr("linux");

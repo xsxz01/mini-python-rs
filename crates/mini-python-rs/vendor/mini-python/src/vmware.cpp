@@ -1,12 +1,5 @@
 #include "vmware.hpp"
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
+#include "platform.hpp"
 #include "lexer.hpp"
 #include "parser.hpp"
 #include "cffi.hpp"
@@ -25,6 +18,7 @@
 #include <iomanip>
 #include <set>
 #include <functional>
+#include <complex>
 
 namespace {
     using namespace minipy;
@@ -545,6 +539,13 @@ const char* exceptionParent(const std::string& type){
     if (type == "ZeroDivisionError" || type == "OverflowError" ||
         type == "FloatingPointError") return "ArithmeticError";
     if (type == "ModuleNotFoundError") return "ImportError";
+    if (type == "Error") return "ValueError";
+    if (type == "NoSectionError" || type == "DuplicateSectionError" ||
+        type == "NoOptionError" || type == "InterpolationError" ||
+        type == "MissingSectionHeaderError" || type == "ParsingError" ||
+        type == "InterpolationMissingOptionError" || type == "InterpolationSyntaxError")
+        return "Error";
+    if (type == "TOMLDecodeError") return "ValueError";
     if (type == "IndexError" || type == "KeyError") return "LookupError";
     if (type == "UnboundLocalError") return "NameError";
     if (type == "BlockingIOError" || type == "ChildProcessError" ||
@@ -562,6 +563,7 @@ const char* exceptionParent(const std::string& type){
     if (type == "UnicodeDecodeError" || type == "UnicodeEncodeError" ||
         type == "UnicodeTranslateError") return "UnicodeError";
     if (type.size() > 7 && type.compare(type.size() - 7, 7, "Warning") == 0) return "Warning";
+    if (type == "CookieError" || type == "Empty" || type == "Full") return "Exception";
     return "";
 }
 
@@ -570,9 +572,12 @@ const char* exceptionParent(const std::string& type){
 // ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤᠮᠤᠨ ᠲᠣᠬᠢᠷᠠᠭᠤᠯᠳᠠᠭ᠎ᠠ
 bool handlerMatches(const std::string& handlerType, const std::string& excType){
     if (handlerType.empty()) return true;
+    std::string shortHandler = handlerType;
+    size_t dot = shortHandler.rfind('.');
+    if (dot != std::string::npos) shortHandler = shortHandler.substr(dot + 1);
     std::string current = excType;
     while (!current.empty()){
-        if (current == handlerType) return true;
+        if (current == handlerType || current == shortHandler) return true;
         current = exceptionParent(current);
     }
     return false;
@@ -879,6 +884,60 @@ std::string floatToString(double v){
     return out;
 }
 
+// 是否为复数 value (字面量或 complex() 构造的原生对象)
+// Whether a value is a complex number (literal or complex() native object)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ value ᠮᠥᠨ ᠦᠦ
+bool isComplexValue(const value& v){
+    if (v.type != "native_object" || !v.ptr) return false;
+    auto* inst = static_cast<ffi_instance*>(v.ptr);
+    if (inst->typeName == "complex") return true;
+    return inst->klass && inst->klass->name == "complex";
+}
+
+// 读取复数的实部与虚部 (非复数返回 false)
+// Read real and imaginary parts of a complex value (false if not complex)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠪᠣᠳᠢᠲ ᠪᠠ ᠬᠤᠶᠠᠳᠤᠭᠠᠷ ᠬᠡᠰᠡᠭ ᠢ ᠤᠩᠰᠢᠨ᠎ᠠ
+bool complexParts(const value& v, double& real, double& imag){
+    if (!isComplexValue(v)) return false;
+    auto* inst = static_cast<ffi_instance*>(v.ptr);
+    real = 0.0;
+    imag = 0.0;
+    auto readPart = [](const value& part) -> double {
+        if (!part.ptr) return 0.0;
+        if (part.type == "float") return *static_cast<double*>(part.ptr);
+        if (part.type == "int" || part.type == "bool")
+            return static_cast<double>(*static_cast<long long*>(part.ptr));
+        return 0.0;
+    };
+    auto reIt = inst->attributes.find("real");
+    if (reIt != inst->attributes.end()) real = readPart(reIt->second);
+    auto imIt = inst->attributes.find("imag");
+    if (imIt != inst->attributes.end()) imag = readPart(imIt->second);
+    return true;
+}
+
+// 复数单个部分的文本 (整数浮点去掉 .0 后缀, 与 CPython 一致)
+// Text of one complex part (drop .0 for integral floats, matching CPython)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠨᠢᠭᠡ ᠬᠡᠰᠡᠭ ᠦᠨ ᠲ᠋ᠧᠺᠰᠲ
+std::string complexPartToString(double v){
+    std::string text = floatToString(v);
+    if (text.size() > 2 && text.compare(text.size() - 2, 2, ".0") == 0)
+        text.erase(text.size() - 2);
+    return text;
+}
+
+// 复数的 repr 文本 (2j / -2j / (1+2j) / (1-2j))
+// repr text of a complex value (2j / -2j / (1+2j) / (1-2j))
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ repr ᠲ᠋ᠧᠺᠰᠲ
+std::string complexToString(double real, double imag){
+    if (real == 0.0 && !std::signbit(real)){
+        return complexPartToString(imag) + "j";
+    }
+    std::string reText = complexPartToString(real);
+    std::string imText = complexPartToString(std::fabs(imag));
+    return "(" + reText + (std::signbit(imag) ? "-" : "+") + imText + "j)";
+}
+
 // 重复 字符串
 // repeat string
 // ᠳᠠᠨᠳᠠᠭᠤᠯᠬᠤ ᠦᠰᠦᠭ
@@ -1070,17 +1129,92 @@ std::string suggestExceptionName(const std::string& name){
 }
 }
 
+// 追加 UTF-8 码点
+// Append a UTF-8 codepoint
+// UTF-8 ᠺᠣᠳ᠋ ᠨᠠᠮᠠᠭ᠌᠎ᠠ
+static void appendUtf8Codepoint(std::string& out, unsigned int cp){
+    if (cp < 0x80){
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800){
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000){
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// 字节串 repr 文本
+// Byte-string repr text
+// ᠪᠠᠶᠢᠲ᠋ ᠦᠰᠦᠭ repr ᠪᠢᠴᠢᠭ
+static std::string bytesReprText(const std::string& raw, bool isBytearray){
+    std::string result = isBytearray ? "bytearray(b'" : "b'";
+    for (unsigned char ch : raw){
+        if (ch == '\n') result += "\\n";
+        else if (ch == '\r') result += "\\r";
+        else if (ch == '\t') result += "\\t";
+        else if (ch == '\\') result += "\\\\";
+        else if (ch == '\'') result += "\\'";
+        else if (ch < 32 || ch > 126){
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\x%02x", ch);
+            result += buf;
+        } else {
+            result.push_back(static_cast<char>(ch));
+        }
+    }
+    result += isBytearray ? "')" : "'";
+    return result;
+}
+
 std::string minipy::pythonRepr(vm& vm, const value& v){
+    if (v.ptr != nullptr && (v.type == "bytes" || v.type == "bytearray")){
+        return bytesReprText(*static_cast<std::string*>(v.ptr), v.type == "bytearray");
+    }
     if (v.ptr != nullptr && v.type == "str"){
         std::string text = *static_cast<std::string*>(v.ptr);
         bool hasSingle = text.find('\'') != std::string::npos;
         bool hasDouble = text.find('"') != std::string::npos;
         char quote = (hasSingle && !hasDouble) ? '"' : '\'';
         std::string result(1, quote);
-        for (char c : text){
-            if (c == '\\') result += "\\\\";
-            else if (c == quote) result += std::string("\\") + quote;
-            else result += c;
+        size_t i = 0;
+        while (i < text.size()){
+            char c = text[i];
+            if (c == '\\'){ result += "\\\\"; ++i; continue; }
+            if (c == quote){ result += std::string("\\") + quote; ++i; continue; }
+            unsigned char u = static_cast<unsigned char>(c);
+            if (c == '\n'){ result += "\\n"; ++i; continue; }
+            if (c == '\r'){ result += "\\r"; ++i; continue; }
+            if (c == '\t'){ result += "\\t"; ++i; continue; }
+            if (u < 0x20 || u == 0x7F){
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\x%02x", u);
+                result += buf;
+                ++i;
+                continue;
+            }
+            if (u >= 0xE0 && u < 0xF0 && i + 2 < text.size() &&
+                (static_cast<unsigned char>(text[i + 1]) & 0xC0) == 0x80 &&
+                (static_cast<unsigned char>(text[i + 2]) & 0xC0) == 0x80){
+                unsigned int cp = ((u & 0x0F) << 12) |
+                                  ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
+                                  (static_cast<unsigned char>(text[i + 2]) & 0x3F);
+                if (cp >= 0xD800 && cp <= 0xDFFF){
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", cp);
+                    result += buf;
+                    i += 3;
+                    continue;
+                }
+            }
+            result += c;
+            ++i;
         }
         result += quote;
         return result;
@@ -1133,6 +1267,21 @@ std::string minipy::pythonRepr(vm& vm, const value& v){
             }
         }
         return result + "])";
+    }
+    if (v.ptr != nullptr && v.type == "native_object"){
+        auto* inst = static_cast<ffi_instance*>(v.ptr);
+        if (inst){
+            if (inst->isTypeObject) return "<class '" + inst->typeName + "'>";
+            if (inst->klass && inst->klass->methods.count("__repr__")){
+                bool hadError = vm.hasError();
+                value result;
+                if (cffiCallMethod(vm, v, "__repr__", {}, result) && !vm.hasError() &&
+                    result.type == "str" && result.ptr){
+                    return *static_cast<std::string*>(result.ptr);
+                }
+                if (!hadError && vm.hasError()) vm.clearErr();
+            }
+        }
     }
     return vm.toString(v);
 }
@@ -1372,13 +1521,9 @@ value::~value(){
     if (owner) owner->releaseValue(ptr);
 }
 
-static std::unordered_map<std::string, value>& builtinTypeCache();
-
 vm::~vm(){
 
     shuttingDown = true;
-
-    builtinTypeCache().clear();
 
     scopes.clear();
     callResults.clear();
@@ -1483,6 +1628,38 @@ void vm::destroyHeapObject(void* pointer){
         default:
             break;
     }
+}
+
+long long vm::heapObjectCount() const{
+    return static_cast<long long>(heapObjects.size());
+}
+
+std::vector<value> vm::heapSnapshot(){
+    std::vector<value> out;
+    out.reserve(heapObjects.size());
+    for (const auto& entry : heapObjects){
+        const char* typeName = nullptr;
+        switch (entry.second.kind){
+            case vk_int: typeName = "int"; break;
+            case vk_float: typeName = "float"; break;
+            case vk_bool: typeName = "bool"; break;
+            case vk_str: typeName = "str"; break;
+            case vk_list: typeName = "list"; break;
+            case vk_tuple: typeName = "tuple"; break;
+            case vk_dict: typeName = "dict"; break;
+            case vk_dict_view: typeName = "dict_view"; break;
+            case vk_range: typeName = "range"; break;
+            case vk_object: typeName = "object"; break;
+            case vk_native_object: typeName = "native_object"; break;
+            case vk_exception: typeName = "exception"; break;
+            case vk_class: typeName = "class"; break;
+            case vk_super: typeName = "super"; break;
+            case vk_bound_function: typeName = "bound_function"; break;
+            default: break;
+        }
+        if (typeName) out.push_back(value(typeName, entry.second.pointer, this));
+    }
+    return out;
 }
 
 value vm::makeInt(long long v){
@@ -1597,6 +1774,15 @@ long long vm::hashKey(const value& key){
         return addr ^ (addr >> 16);
     }
     if (key.type == "native_object" && key.ptr){
+        auto* inst = static_cast<ffi_instance*>(key.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__hash__")){
+            value result;
+            bool hadError = hasError();
+            if (cffiCallMethod(*this, key, "__hash__", {}, result) && !hasError() &&
+                (result.type == "int" || result.type == "bool"))
+                return toInt(result);
+            if (!hadError && hasError()) clearPendingExceptionState();
+        }
         long long addr = (long long)(uintptr_t)key.ptr;
         return addr ^ (addr >> 16);
     }
@@ -1765,6 +1951,32 @@ value vm::makeNativeObject(const ffilib* library, const ffi_class* klass, void* 
     return {"native_object", keep(vk_native_object, instance), this};
 }
 
+// 构造一个复数 value (real + imag*1j), 复用 builtins 的 complex 类
+// Build a complex value (real + imag*1j), reusing the builtins complex class
+// ᠰᠢᠯᠢ ᠲᠣ᠎ value ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+value vm::makeComplex(double real, double imag){
+    const ffilib* builtinsLib = nullptr;
+    const ffi_class* complexClass = nullptr;
+    for (auto* lib : cffiLibraries){
+        if (lib && lib->name == "builtins"){
+            auto it = lib->classes.find("complex");
+            if (it != lib->classes.end()){
+                builtinsLib = lib;
+                complexClass = &it->second;
+            }
+            break;
+        }
+    }
+    value obj = makeNativeObject(builtinsLib, complexClass, nullptr);
+    auto* inst = static_cast<ffi_instance*>(obj.ptr);
+    if (inst){
+        if (inst->typeName.empty()) inst->typeName = "complex";
+        inst->attributes["real"] = makeFloat(real);
+        inst->attributes["imag"] = makeFloat(imag);
+    }
+    return obj;
+}
+
 value vm::makeDynamicObject(const std::string& typeName, void* handle,
 
                                      dynamic_get getter, dynamic_call caller){
@@ -1837,7 +2049,28 @@ bool vm::truthy(const value& v){
             return !static_cast<std::vector<value>*>(inst->container.ptr)->empty();
         return true;
     }
-    if (v.type == "native_object"){
+    if (v.type == "native_object" && v.ptr){
+        auto* inst = static_cast<ffi_instance*>(v.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__bool__")){
+            value result;
+            bool hadError = hasError();
+            if (cffiCallMethod(*this, v, "__bool__", {}, result) && !hasError())
+                return truthy(result);
+            if (!hadError && hasError()) clearErr();
+        }
+        if (inst && inst->klass && inst->klass->methods.count("__len__")){
+            value result;
+            bool hadError = hasError();
+            if (cffiCallMethod(*this, v, "__len__", {}, result) && !hasError())
+                return toInt(result) != 0;
+            if (!hadError && hasError()) clearErr();
+        }
+
+// 复数零值 (0j) 为假
+// zero complex (0j) is falsy
+// ᠰᠢᠯᠢ ᠲᠣ᠎ 0j ᠦᠭᠡᠢ
+        double cRe, cIm;
+        if (complexParts(v, cRe, cIm)) return cRe != 0.0 || cIm != 0.0;
         return true;
     }
     return false;
@@ -1857,25 +2090,8 @@ std::string vm::toString(const value& v) {
     if (v.type == "str"){
         return *static_cast<std::string*>(v.ptr);
     }
-    if (v.type == "bytes"){
-        auto* raw = static_cast<std::string*>(v.ptr);
-        std::string result = "b'";
-        for (unsigned char ch : *raw){
-            if (ch == '\n') result += "\\n";
-            else if (ch == '\r') result += "\\r";
-            else if (ch == '\t') result += "\\t";
-            else if (ch == '\\') result += "\\\\";
-            else if (ch == '\'') result += "\\'";
-            else if (ch < 32 || ch > 126){
-                char buf[8];
-                std::snprintf(buf, sizeof(buf), "\\x%02x", ch);
-                result += buf;
-            } else {
-                result.push_back(static_cast<char>(ch));
-            }
-        }
-        result += "'";
-        return result;
+    if (v.type == "bytes" || v.type == "bytearray"){
+        return bytesReprText(*static_cast<std::string*>(v.ptr), v.type == "bytearray");
     }
     if (v.type == "range"){
         auto* range = static_cast<range_t*>(v.ptr);
@@ -1976,6 +2192,36 @@ std::string vm::toString(const value& v) {
             }
             return payload->msg;
         }
+        if (instance && instance->isTypeObject){
+            return "<class '" + instance->typeName + "'>";
+        }
+
+// 复数按 CPython 格式打印 (2j / (1+2j))
+// print complex in CPython format (2j / (1+2j))
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢ CPython ᠬᠡᠯᠪᠡᠷᠢ ᠪᠡᠷ ᠬᠡᠪᠡᠷᠢᠶᠡᠨ᠎ᠠ
+        double cRe, cIm;
+        if (complexParts(v, cRe, cIm)){
+            return complexToString(cRe, cIm);
+        }
+        if (instance && instance->klass){
+            auto strIt = instance->klass->methods.find("__str__");
+            if (strIt != instance->klass->methods.end() && strIt->second){
+                value strResult;
+                if (cffiCallMethod(*this, v, "__str__", {}, strResult) &&
+                    !hasError() && strResult.type == "str" && strResult.ptr){
+                    return *static_cast<std::string*>(strResult.ptr);
+                }
+                clearPendingExceptionState();
+            }
+            auto reprIt = instance->klass->methods.find("__repr__");
+            if (reprIt != instance->klass->methods.end() && reprIt->second){
+                value reprResult;
+                if (cffiCallMethod(*this, v, "__repr__", {}, reprResult) &&
+                    !hasError() && reprResult.type == "str" && reprResult.ptr){
+                    return *static_cast<std::string*>(reprResult.ptr);
+                }
+            }
+        }
         if (instance && !instance->typeName.empty()){
             return "<" + instance->typeName + " object>";
         }
@@ -2065,6 +2311,47 @@ bool vm::valuesEqual(const value& left, const value& right) const {
         return left.ptr == right.ptr;
     }
     if (left.type == "native_object" || right.type == "native_object"){
+
+// native 对象的 __eq__ 优先于指针比较
+// native object __eq__ takes priority over pointer comparison
+// ᠨᠠᠲᠢᠪ ᠣᠪᠶᠧᠺᠲ __eq__ ᠨᠢ ᠰᠢᠯᠢ ᠪᠠᠷ ᠬᠠᠪᠢᠴᠢᠨ᠎ᠠ ᠡᠴᠡ ᠡᠮᠦᠨ᠎ᠡ ᠪᠠᠶᠢᠨ᠎ᠠ
+        auto tryNativeEq = [&](const value& obj, const value& other) -> std::pair<bool, bool>{
+            if (obj.type != "native_object" || !obj.ptr) return {false, false};
+            auto* ninst = static_cast<ffi_instance*>(obj.ptr);
+            if (!ninst->klass) return {false, false};
+            if (ninst->klass->methods.find("__eq__") == ninst->klass->methods.end())
+                return {false, false};
+            auto* self = const_cast<vm*>(this);
+            value result;
+            if (!cffiCallMethod(*self, obj, "__eq__", {other}, result)){
+                if (self->hasError()) self->clearPendingExceptionState();
+                return {false, false};
+            }
+            return {true, self->truthy(result)};
+        };
+        auto [handled1, res1] = tryNativeEq(left, right);
+        if (handled1) return res1;
+        auto [handled2, res2] = tryNativeEq(right, left);
+        if (handled2) return res2;
+
+// 复数按数值比较 ((1+2j) == (1+2j) 成立)
+// compare complex numerically ((1+2j) == (1+2j) holds)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢ ᠲᠣᠭᠠᠨ ᠪᠠᠷ ᠬᠠᠪᠢᠴᠢᠨ᠎ᠠ
+        double lcRe, lcIm, rcRe, rcIm;
+        bool leftCplx = complexParts(left, lcRe, lcIm);
+        bool rightCplx = complexParts(right, rcRe, rcIm);
+        if (leftCplx || rightCplx){
+            bool leftNum = (left.type == "int" || left.type == "float" || left.type == "bool");
+            bool rightNum = (right.type == "int" || right.type == "float" || right.type == "bool");
+            if ((leftCplx || leftNum) && (rightCplx || rightNum)){
+                double a = leftCplx ? lcRe : toFloat(left);
+                double b = leftCplx ? lcIm : 0.0;
+                double c = rightCplx ? rcRe : toFloat(right);
+                double d = rightCplx ? rcIm : 0.0;
+                return a == c && b == d;
+            }
+            return false;
+        }
         return left.ptr == right.ptr;
     }
     if (left.type == "list" && right.type == "list"){
@@ -2132,6 +2419,11 @@ bool vm::valuesEqual(const value& left, const value& right) const {
         return aCount == 1 || a->step == b->step;
     }
     if (left.type == "str" && right.type == "str"){
+        if (!left.ptr || !right.ptr) return left.ptr == right.ptr;
+        return *static_cast<std::string*>(left.ptr) == *static_cast<std::string*>(right.ptr);
+    }
+    if ((left.type == "bytes" || left.type == "bytearray") &&
+        (right.type == "bytes" || right.type == "bytearray")){
         if (!left.ptr || !right.ptr) return left.ptr == right.ptr;
         return *static_cast<std::string*>(left.ptr) == *static_cast<std::string*>(right.ptr);
     }
@@ -2263,6 +2555,20 @@ void vm::removeVariable(const std::string& name){
 
 
 value vm::indexValue(const value& obj, const value& key){
+    if (obj.type == "class" && obj.ptr){
+        auto* klass = static_cast<class_t*>(obj.ptr);
+        if (klass->builtinBase.rfind("enum:", 0) == 0 && key.type == "str"){
+            const std::string& memberName = *static_cast<std::string*>(key.ptr);
+            if (klass->attributes){
+                auto* attrs = static_cast<std::map<std::string, value>*>(klass->attributes);
+                auto it = attrs->find(memberName);
+                if (it != attrs->end() && it->second.type == "native_object")
+                    return it->second;
+            }
+            raiseError("KeyError", "'" + memberName + "'");
+            return makeNone();
+        }
+    }
     // 自定义 __getitem__ 优先
     // Custom __getitem__ takes precedence
     if (obj.type == "object" && obj.ptr){
@@ -2327,6 +2633,22 @@ value vm::indexValue(const value& obj, const value& key){
         return makeString(std::string(1, (*text)[static_cast<size_t>(idx)]));
     }
 
+    if (obj.type == "bytes" || obj.type == "bytearray"){
+        if (key.type != "int" && key.type != "bool"){
+            raiseError("TypeError", "byte indices must be integers or slices, not '" +
+                                    pythonTypeName(key) + "'");
+            return makeNone();
+        }
+        auto* raw = static_cast<std::string*>(obj.ptr);
+        long long idx = toInt(key);
+        if (idx < 0) idx += static_cast<long long>(raw->size());
+        if (idx < 0 || idx >= static_cast<long long>(raw->size())){
+            raiseError("IndexError", "index out of range");
+            return makeNone();
+        }
+        return makeInt(static_cast<unsigned char>((*raw)[static_cast<size_t>(idx)]));
+    }
+
     if (obj.type == "range"){
         auto* range = static_cast<range_t*>(obj.ptr);
         long long idx = toInt(key);
@@ -2344,6 +2666,15 @@ value vm::indexValue(const value& obj, const value& key){
 }
 
 std::string vm::indexAssign(const value& obj, const value& key, const value& v){
+    if (obj.type == "native_object" && obj.ptr){
+        auto* ninst = static_cast<ffi_instance*>(obj.ptr);
+        if (ninst->klass && ninst->klass->methods.count("__setitem__")){
+            value r;
+            cffiCallMethod(*this, obj, "__setitem__", {key, v}, r);
+            return "";
+        }
+        return "'" + pythonTypeName(obj) + "' object does not support item assignment";
+    }
     if (obj.type == "object" && obj.ptr){
         auto* inst = static_cast<instance*>(obj.ptr);
         if (inst->klass){
@@ -2365,6 +2696,26 @@ std::string vm::indexAssign(const value& obj, const value& key, const value& v){
         return dictSet(obj, key, v);
     }
 
+    if (obj.type == "bytearray"){
+        if (key.type != "int" && key.type != "bool"){
+            return "bytearray indices must be integers or slices, not '" +
+                   pythonTypeName(key) + "'";
+        }
+        auto* raw = static_cast<std::string*>(obj.ptr);
+        long long idx = toInt(key);
+        if (idx < 0) idx += static_cast<long long>(raw->size());
+        if (idx < 0 || idx >= static_cast<long long>(raw->size()))
+            return "bytearray index out of range";
+        long long byte = toInt(v);
+        if (byte < 0 || byte > 255)
+            return "byte must be in range(0, 256)";
+        (*raw)[static_cast<size_t>(idx)] = static_cast<char>(byte);
+        return "";
+    }
+    if (obj.type == "bytes"){
+        return "'bytes' object does not support item assignment";
+    }
+
     if (obj.type == "list"){
         auto* items = static_cast<std::vector<value>*>(obj.ptr);
         if (key.type != "int" && key.type != "bool"){
@@ -2383,6 +2734,15 @@ std::string vm::indexAssign(const value& obj, const value& key, const value& v){
 }
 
 std::string vm::indexDelete(const value& obj, const value& key){
+    if (obj.type == "native_object" && obj.ptr){
+        auto* ninst = static_cast<ffi_instance*>(obj.ptr);
+        if (ninst->klass && ninst->klass->methods.count("__delitem__")){
+            value r;
+            cffiCallMethod(*this, obj, "__delitem__", {key}, r);
+            return "";
+        }
+        return "'" + pythonTypeName(obj) + "' object doesn't support item deletion";
+    }
     if (obj.type == "object" && obj.ptr){
         auto* inst = static_cast<instance*>(obj.ptr);
         if (inst->klass){
@@ -2451,6 +2811,48 @@ void vm::assignTarget(const std::string& target, const value& v){
             value base = evalExpr(baseText);
             if (failed) return;
             if (isSliceText(indexText)){
+                if (base.type == "bytearray" && base.ptr){
+                    auto* raw = static_cast<std::string*>(base.ptr);
+                    long long bs = 0, be = 0, bst = 1;
+                    if (!sliceBounds(indexText, static_cast<long long>(raw->size()), bs, be, bst)) return;
+                    std::vector<value> vals;
+                    if (v.type == "bytes" || v.type == "bytearray"){
+                        auto* src = static_cast<std::string*>(v.ptr);
+                        for (unsigned char ch : *src)
+                            vals.push_back(makeInt(static_cast<long long>(ch)));
+                    } else {
+                        materializeIterable(v, vals);
+                    }
+                    if (failed) return;
+                    std::string repl;
+                    for (auto& item : vals){
+                        long long byte = toInt(item);
+                        if (byte < 0 || byte > 255){
+                            raiseError("ValueError", "byte must be in range(0, 256)");
+                            return;
+                        }
+                        repl.push_back(static_cast<char>(byte));
+                    }
+                    if (bst == 1){
+                        raw->erase(raw->begin() + bs, raw->begin() + be);
+                        raw->insert(raw->begin() + bs, repl.begin(), repl.end());
+                    } else {
+                        long long count = (bst > 0)
+                            ? (be > bs ? (be - bs + bst - 1) / bst : 0)
+                            : (bs > be ? (bs - be - bst - 1) / (-bst) : 0);
+                        if (static_cast<long long>(repl.size()) != count){
+                            raiseError("ValueError", "attempt to assign bytes of size " +
+                                                     std::to_string(repl.size()) +
+                                                     " to extended slice of size " +
+                                                     std::to_string(count));
+                            return;
+                        }
+                        size_t k = 0;
+                        for (long long idx = bs; (bst > 0) ? idx < be : idx > be; idx += bst)
+                            (*raw)[static_cast<size_t>(idx)] = repl[k++];
+                    }
+                    return;
+                }
                 std::vector<value>* lst = nullptr;
                 if (base.type == "list" && base.ptr){
                     lst = static_cast<std::vector<value>*>(base.ptr);
@@ -2529,6 +2931,17 @@ void vm::assignTarget(const std::string& target, const value& v){
                                         "' object does not support item assignment");
                 return;
             }
+            if (base.type == "native_object" && base.ptr){
+                auto* ninst = static_cast<ffi_instance*>(base.ptr);
+                if (ninst->klass && ninst->klass->methods.count("__setitem__")){
+                    value r;
+                    cffiCallMethod(*this, base, "__setitem__", {key, v}, r);
+                    return;
+                }
+                raiseError("TypeError", "'" + pythonTypeName(base) +
+                                        "' object does not support item assignment");
+                return;
+            }
             if (base.type == "list" && base.ptr){
                 auto* lst = static_cast<std::vector<value>*>(base.ptr);
                 int idx = toInt(key);
@@ -2538,6 +2951,31 @@ void vm::assignTarget(const std::string& target, const value& v){
                     return;
                 }
                 (*lst)[idx] = v;
+                return;
+            }
+            if (base.type == "bytearray" && base.ptr){
+                if (key.type != "int" && key.type != "bool"){
+                    raiseError("TypeError", "bytearray indices must be integers or slices, not " +
+                                            pythonTypeName(key));
+                    return;
+                }
+                auto* raw = static_cast<std::string*>(base.ptr);
+                long long idx = toInt(key);
+                if (idx < 0) idx += static_cast<long long>(raw->size());
+                if (idx < 0 || idx >= static_cast<long long>(raw->size())){
+                    raiseError("IndexError", "bytearray index out of range");
+                    return;
+                }
+                long long byte = toInt(v);
+                if (byte < 0 || byte > 255){
+                    raiseError("ValueError", "byte must be in range(0, 256)");
+                    return;
+                }
+                (*raw)[static_cast<size_t>(idx)] = static_cast<char>(byte);
+                return;
+            }
+            if (base.type == "bytes"){
+                raiseError("TypeError", "'bytes' object does not support item assignment");
                 return;
             }
             if (base.type != "dict"){
@@ -2635,7 +3073,6 @@ void vm::assignTarget(const std::string& target, const value& v){
     if (base && base->type == "native_object" && base->ptr){
         auto* instance = static_cast<ffi_instance*>(base->ptr);
         instance->attributes[member] = v;
-
         if (instance->typeName == "Structure"){
             auto* info = static_cast<CtypesStructInfo*>(instance->handle);
             if (info){
@@ -3178,6 +3615,21 @@ value vm::evalOperand(const std::string& item, const span_t& span){
         }
         v = makeDict(items);
         p = i;
+    } else if (text.size() > 2 && text[0] == 'b' && text[1] == '#'){
+        size_t q = 2;
+        while (q < text.size() && std::isdigit(static_cast<unsigned char>(text[q]))) q++;
+        long long index = -1;
+        if (q > 2){
+            try { index = std::stoll(text.substr(2, q - 2)); } catch (...){}
+        }
+        const script_t* activeScript = currentScript ? currentScript : &script;
+        if (index >= 0 && index < static_cast<long long>(activeScript->StringLibrary.size())){
+            v = makeString(activeScript->StringLibrary[static_cast<size_t>(index)]);
+            v.type = "bytes";
+        } else {
+            v = makeNone();
+        }
+        p = q;
     } else if (text[0] == '#'){
 
         size_t q = 1;
@@ -3215,17 +3667,25 @@ value vm::evalOperand(const std::string& item, const span_t& span){
         bool hasExp = false;
         bool expSign = false;
         bool isHex = (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'));
+        bool isBin = (text.size() >= 2 && text[0] == '0' && (text[1] == 'b' || text[1] == 'B'));
         size_t startScan = 0;
-        if (isHex){ startScan = 2; digits = true; }
+        if (isHex || isBin){ startScan = 2; digits = true; }
         while (startScan < text.size()){
             char c = text[startScan];
             if (isHex && std::isxdigit(static_cast<unsigned char>(c))){
                 digits = true;
                 startScan++;
+            } else if (isBin && (c == '0' || c == '1')){
+                digits = true;
+                startScan++;
             } else break;
         }
+        bool complexLiteral = false;
         if (isHex){
             r = text.size();
+        } else if (isBin){
+            if (startScan == text.size() && startScan > 2) r = text.size();
+            else { r = 0; digits = false; }
         } else {
             while (r < text.size()){
                 char c = text[r];
@@ -3245,25 +3705,48 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                     break;
                 }
             }
+
+// 复数虚部后缀: 数值部分紧跟 j/J 时按复数字面量处理
+// complex imaginary suffix: treat as complex literal when digits are followed by j/J
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠬᠤᠶᠠᠳᠤᠭᠠᠷ ᠬᠡᠰᠡᠭ ᠦᠨ ᠳᠠᠭᠠᠪᠤᠷᠢ
+            if (digits && r < text.size() && (text[r] == 'j' || text[r] == 'J')){
+                complexLiteral = true;
+                r++;
+            }
         }
         bool numericPrefix = digits &&
             (r >= text.size() || text[r] == '[' || text[r] == '.' || text[r] == '(');
         if (numericPrefix){
-            std::string atom = text.substr(0, r);
-            bool isFloat = (dot || hasExp);
-            if (isFloat){
-                v = makeFloat(std::stod(atom));
+            std::string atom = text.substr(0, complexLiteral ? r - 1 : r);
+            if (complexLiteral){
+                double imagVal = 0.0;
+                try { imagVal = std::stod(atom); } catch (...) { imagVal = 0.0; }
+                v = makeComplex(0.0, imagVal);
             } else {
+                bool isFloat = (dot || hasExp);
+                if (isFloat){
+                    v = makeFloat(std::stod(atom));
+                } else {
 
-                long long intVal = 0;
-                try {
-                    int base = (atom.size() >= 2 && (atom[0] == '0' && (atom[1] == 'x' || atom[1] == 'X'))) ? 16 : 10;
-                    size_t idx = 0;
-                    intVal = std::stoll(atom, &idx, base);
-                } catch (...) {
-                    intVal = 0;
+                    long long intVal = 0;
+                    try {
+                        int base = 10;
+                        std::string digitsPart = atom;
+                        if (atom.size() >= 2 && atom[0] == '0' &&
+                            (atom[1] == 'x' || atom[1] == 'X')){
+                            base = 16;
+                        } else if (atom.size() >= 2 && atom[0] == '0' &&
+                                   (atom[1] == 'b' || atom[1] == 'B')){
+                            base = 2;
+                            digitsPart = atom.substr(2);
+                        }
+                        size_t idx = 0;
+                        intVal = std::stoll(digitsPart, &idx, base);
+                    } catch (...) {
+                        intVal = 0;
+                    }
+                    v = makeInt(intVal);
                 }
-                v = makeInt(intVal);
             }
             p = r;
         } else {
@@ -3347,6 +3830,24 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                                         foundBuiltin = true;
                                         break;
                                     }
+                                }
+                            }
+                            if (!foundBuiltin){
+                                // 内置异常类型可作一等值 (如 assertRaises(ValueError, f))
+                                // Builtin exception types as first-class values
+                                // builtin ᠬᠠᠯᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠲᠥᠷᠥᠯ ᠦᠳ ᠢ ᠦᠨ᠎ᠡ ᠪᠣᠯᠭᠠᠬᠤ
+                                const std::vector<std::string>& excNames = builtinExceptionNames();
+                                if (std::find(excNames.begin(), excNames.end(), name) != excNames.end()){
+                                    ffi_instance* ni = new ffi_instance();
+                                    ni->library = nullptr;
+                                    ni->klass = nullptr;
+                                    ni->typeName = name;
+                                    ni->handle = nullptr;
+                                    value excType("native_object",
+                                                     keep(vk_native_object, ni), this);
+                                    v = excType;
+                                    defined = true;
+                                    foundBuiltin = true;
                                 }
                             }
                             if (!foundBuiltin){
@@ -3474,9 +3975,51 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                 return makeNone();
             }
 
+            if (v.type == "native_object" && v.ptr){
+                auto* ninst = static_cast<ffi_instance*>(v.ptr);
+                if (ninst->klass && ninst->klass->methods.count("__getitem__")){
+                    value indexValue = evalExpr(indexExpr);
+                    if (failed) return makeNone();
+                    value r;
+                    if (cffiCallMethod(*this, v, "__getitem__", {indexValue}, r)){
+                        if (hasError()) return makeNone();
+                        v = r;
+                        partIndex++;
+                        p = close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (v.type == "class" && v.ptr){
+                auto* klass = static_cast<class_t*>(v.ptr);
+                if (klass->builtinBase.rfind("enum:", 0) == 0){
+                    value enumKey = evalExpr(indexExpr);
+                    if (failed) return makeNone();
+                    if (enumKey.type == "str"){
+                        const std::string& memberName = *static_cast<std::string*>(enumKey.ptr);
+                        if (klass->attributes){
+                            auto* attrs = static_cast<std::map<std::string, value>*>(klass->attributes);
+                            auto it = attrs->find(memberName);
+                            if (it != attrs->end() && it->second.type == "native_object"){
+                                v = it->second;
+                                partIndex++;
+                                p = close + 1;
+                                continue;
+                            }
+                        }
+                        setIndexCaret(partIndex);
+                        raiseError("KeyError", "'" + memberName + "'");
+                        return makeNone();
+                    }
+                    setIndexCaret(partIndex);
+                    raiseError("TypeError", "enum keys must be strings");
+                    return makeNone();
+                }
+            }
             if (v.type != "list" && v.type != "str" &&
                 v.type != "dict" && v.type != "tuple" &&
-                v.type != "range"){
+                v.type != "range" && v.type != "bytes" &&
+                v.type != "bytearray"){
                 setIndexCaret(partIndex);
                 raiseError("TypeError", "'" + pythonTypeName(v) + "' object is not subscriptable");
                 return makeNone();
@@ -3484,12 +4027,15 @@ value vm::evalOperand(const std::string& item, const span_t& span){
 
             if (isSliceText(indexExpr) &&
                 (v.type == "list" || v.type == "tuple" ||
-                 v.type == "str" || v.type == "range")){
+                 v.type == "str" || v.type == "range" ||
+                 v.type == "bytes" || v.type == "bytearray")){
                 long long length = 0;
                 if (v.type == "list" || v.type == "tuple"){
                     length = static_cast<long long>(
                         static_cast<std::vector<value>*>(v.ptr)->size());
                 } else if (v.type == "str"){
+                    length = static_cast<long long>(static_cast<std::string*>(v.ptr)->size());
+                } else if (v.type == "bytes" || v.type == "bytearray"){
                     length = static_cast<long long>(static_cast<std::string*>(v.ptr)->size());
                 } else {
                     length = static_cast<range_t*>(v.ptr)->count();
@@ -3510,6 +4056,15 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                         out.push_back((*str)[static_cast<size_t>(k)]);
                     }
                     v = makeString(out);
+                } else if (v.type == "bytes" || v.type == "bytearray"){
+                    auto* raw = static_cast<std::string*>(v.ptr);
+                    std::string out;
+                    for (long long k = s; (st > 0) ? k < e : k > e; k += st){
+                        out.push_back((*raw)[static_cast<size_t>(k)]);
+                    }
+                    value sliced = makeString(out);
+                    sliced.type = v.type;
+                    v = sliced;
                 } else {
                     auto* range = static_cast<range_t*>(v.ptr);
                     long long count = (st > 0) ? (e > s ? (e - s + st - 1) / st : 0)
@@ -3554,6 +4109,9 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                 } else if (v.type == "range"){
                     raiseError("TypeError", "range indices must be integers or slices, not " +
                                                 pythonTypeName(indexValue));
+                } else if (v.type == "bytes" || v.type == "bytearray"){
+                    raiseError("TypeError", "byte indices must be integers or slices, not " +
+                                                pythonTypeName(indexValue));
                 } else {
                     raiseError("TypeError", "string indices must be integers, not '" +
                                                 pythonTypeName(indexValue) + "'");
@@ -3581,6 +4139,27 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                 } else {
                     setIndexCaret(partIndex);
                     raiseError("IndexError", "range object index out of range");
+                    return makeNone();
+                }
+            } else if (v.type == "bytes" || v.type == "bytearray"){
+                auto* raw = static_cast<std::string*>(v.ptr);
+                if (index < 0) index += static_cast<long long>(raw->size());
+                if (index >= 0 && index < static_cast<long long>(raw->size())){
+                    v = makeInt(static_cast<unsigned char>((*raw)[static_cast<size_t>(index)]));
+                } else {
+                    setIndexCaret(partIndex);
+                    raiseError("IndexError", "index out of range");
+                    return makeNone();
+                }
+            } else if (v.type == "native_object" && v.ptr){
+                std::vector<value> callArgs;
+                callArgs.push_back(indexValue);
+                value result;
+                if (cffiCallMethod(*this, v, "__getitem__", callArgs, result)){
+                    v = result;
+                } else {
+                    setIndexCaret(partIndex);
+                    raiseError("TypeError", "'" + pythonTypeName(v) + "' object is not subscriptable");
                     return makeNone();
                 }
             } else {
@@ -3746,6 +4325,13 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                             resolved = instance->dynamicGet(*this, instance->handle, member, dynamicValue);
                             if (resolved) v = dynamicValue;
                         }
+                        if (!resolved && member == "__name__"){
+                            std::string typeName = !instance->typeName.empty()
+                                ? instance->typeName
+                                : (instance->klass ? instance->klass->name : "object");
+                            v = makeString(typeName);
+                            resolved = true;
+                        }
                         if (!resolved){
                             v = findVariable(fullName);
                             if (!failed && v.type == "none"){
@@ -3819,6 +4405,23 @@ value vm::evalOperand(const std::string& item, const span_t& span){
                             if (failed) return makeNone();
                             v = dataValue;
                             found = true;
+                        } else if (!failed){
+                            auto funcIt = library->functions.find(member);
+                            if (funcIt != library->functions.end() && funcIt->second != nullptr){
+                                auto* ni = new ffi_instance();
+                                ni->library = library;
+                                ni->klass = nullptr;
+                                ni->typeName = member;
+                                ni->handle = funcIt->second;
+                                v = value("native_object", keep(vk_native_object, ni), this);
+                                found = true;
+                            } else {
+                                auto classIt = library->classes.find(member);
+                                if (classIt != library->classes.end()){
+                                    v = makeNativeObject(library, &classIt->second, nullptr);
+                                    found = true;
+                                }
+                            }
                         }
                         break;
                     }
@@ -3833,6 +4436,14 @@ value vm::evalOperand(const std::string& item, const span_t& span){
 
                 if (!found && v.type == "str" && member == "__name__"){
                     v = makeString(toString(v));
+                    found = true;
+                }
+                if (!found && v.type == "native_object" && v.ptr && member == "__name__"){
+                    auto* inst = static_cast<ffi_instance*>(v.ptr);
+                    std::string typeName = !inst->typeName.empty()
+                        ? inst->typeName
+                        : (inst->klass ? inst->klass->name : "object");
+                    v = makeString(typeName);
                     found = true;
                 }
                 if (!found && !failed && defined){
@@ -3856,6 +4467,15 @@ value vm::applyUnary(const std::string& op, const value& v){
         return makeBool(!truthy(v));
     }
     auto tryScriptMagic = [&](const std::string& methodName) -> std::pair<bool, value> {
+        if (v.type == "native_object" && v.ptr){
+            auto* ninst = static_cast<ffi_instance*>(v.ptr);
+            if (!ninst->klass) return {false, makeNone()};
+            if (ninst->klass->methods.find(methodName) == ninst->klass->methods.end())
+                return {false, makeNone()};
+            value result;
+            cffiCallMethod(*this, v, methodName, {}, result);
+            return {true, result};
+        }
         if (v.type != "object" || !v.ptr) return {false, makeNone()};
         auto* inst = static_cast<instance*>(v.ptr);
         if (!inst->klass) return {false, makeNone()};
@@ -3869,6 +4489,12 @@ value vm::applyUnary(const std::string& op, const value& v){
     bool isNumber = (v.type == "int" || v.type == "float" || v.type == "bool");
     if (op == "+"){
         if (!isNumber){
+
+// 一元 + 作用于复数时原样返回
+// unary + on a complex returns it unchanged
+// ᠨᠢᠭᠡᠳᠦᠭᠡᠷ + ᠰᠢᠯᠢ ᠲᠣ᠎ ᠳᠤ ᠦᠢᠯᠡᠳᠬᠦ
+            double cRe, cIm;
+            if (complexParts(v, cRe, cIm)) return v;
             auto [ok, r] = tryScriptMagic("__pos__");
             if (ok) return r;
             raiseError("TypeError", "bad operand type for unary +: '" + pythonTypeName(v) + "'");
@@ -3882,6 +4508,14 @@ value vm::applyUnary(const std::string& op, const value& v){
         }
         if (v.type == "int" || v.type == "bool"){
             return makeInt(-toInt(v));
+        }
+
+// 复数取负: 实部虚部同时取负
+// complex negation: negate both real and imaginary parts
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢ ᠰᠦᠯᠢᠵᠢᠨ᠎ᠡ
+        {
+            double cRe, cIm;
+            if (complexParts(v, cRe, cIm)) return makeComplex(-cRe, -cIm);
         }
         auto [ok, r] = tryScriptMagic("__neg__");
         if (ok) return r;
@@ -4398,6 +5032,18 @@ static std::pair<bool, value> tryMagicBinaryOp(
     std::string reversedName = magicName(op, true);
     auto tryCall = [&](const value& obj, const std::string& methodName,
                        const value& other) -> std::pair<bool, value> {
+        if (methodName.empty()) return {false, vm.makeNone()};
+        if (obj.type == "native_object" && obj.ptr){
+            auto* ninst = static_cast<ffi_instance*>(obj.ptr);
+            if (!ninst->klass) return {false, vm.makeNone()};
+            if (ninst->klass->methods.find(methodName) == ninst->klass->methods.end())
+                return {false, vm.makeNone()};
+            value result;
+            if (cffiCallMethod(vm, obj, methodName, {other}, result))
+                return {true, result};
+            if (vm.hasError()) return {true, result};
+            return {true, result};
+        }
         if (obj.type != "object" || !obj.ptr) return {false, vm.makeNone()};
         auto* inst = static_cast<instance*>(obj.ptr);
         if (!inst->klass) return {false, vm.makeNone()};
@@ -4439,7 +5085,16 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
         bool result = false;
         bool bothNumber = (left.type == "int" || left.type == "float" || left.type == "bool") &&
                           (right.type == "int" || right.type == "float" || right.type == "bool");
-        if (left.type == "str" && right.type == "str"){
+        if ((left.type == "bytes" || left.type == "bytearray") &&
+            (right.type == "bytes" || right.type == "bytearray") &&
+            left.ptr && right.ptr){
+            std::string a = *static_cast<std::string*>(left.ptr);
+            std::string b = *static_cast<std::string*>(right.ptr);
+            if (op == "<") result = (a < b);
+            else if (op == ">") result = (a > b);
+            else if (op == "<=") result = (a <= b);
+            else if (op == ">=") result = (a >= b);
+        } else if (left.type == "str" && right.type == "str"){
             std::string a = toString(left);
             std::string b = toString(right);
             if (op == "<") result = (a < b);
@@ -4500,6 +5155,19 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
                     break;
                 }
             }
+        } else if ((right.type == "bytes" || right.type == "bytearray") && right.ptr){
+            std::string haystack = *static_cast<std::string*>(right.ptr);
+            std::string needle;
+            if (left.type == "bytes" || left.type == "bytearray"){
+                needle = *static_cast<std::string*>(left.ptr);
+            } else if (left.type == "int" || left.type == "bool"){
+                needle.push_back(static_cast<char>(toInt(left) & 0xFF));
+            } else {
+                raiseError("TypeError", "a bytes-like object is required, not '" +
+                                        pythonTypeName(left) + "'");
+                return makeNone();
+            }
+            found = (haystack.find(needle) != std::string::npos);
         } else if (right.type == "str" && right.ptr){
             std::string haystack = *static_cast<std::string*>(right.ptr);
             std::string needle = toString(left);
@@ -4518,6 +5186,19 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
                     }
                 }
             }
+        } else if (right.type == "native_object" && right.ptr){
+            auto* ninst = static_cast<ffi_instance*>(right.ptr);
+            if (ninst->klass && ninst->klass->methods.count("__contains__")){
+                value r;
+                if (cffiCallMethod(*this, right, "__contains__", {left}, r) && !hasError()){
+                    bool result = truthy(r);
+                    return makeBool(op == "in" ? result : !result);
+                }
+                if (hasError()) return makeNone();
+            }
+            raiseError("TypeError", "argument of type '" + pythonTypeName(right) +
+                                    "' is not a container or iterable");
+            return makeNone();
         } else if (right.type == "object" && right.ptr){
 
             auto* inst = static_cast<instance*>(right.ptr);
@@ -4551,6 +5232,26 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
                     }
                 }
                 return makeBool(op == "in" ? foundElement : !foundElement);
+            }
+            raiseError("TypeError", "argument of type '" + pythonTypeName(right) +
+                                    "' is not a container or iterable");
+            return makeNone();
+        } else if (right.type == "class" && right.ptr){
+            auto* klass = static_cast<class_t*>(right.ptr);
+            if (klass->builtinBase.rfind("enum:", 0) == 0 && klass->attributes){
+                auto* attrs = static_cast<std::map<std::string, value>*>(klass->attributes);
+                auto it = attrs->find("_member_names_");
+                if (it != attrs->end() && it->second.type == "list" && it->second.ptr){
+                    for (auto& nameVal : *static_cast<std::vector<value>*>(it->second.ptr)){
+                        if (nameVal.type != "str") continue;
+                        auto mit = attrs->find(*static_cast<std::string*>(nameVal.ptr));
+                        if (mit != attrs->end() && valuesEqual(left, mit->second)){
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                return makeBool(op == "in" ? found : !found);
             }
             raiseError("TypeError", "argument of type '" + pythonTypeName(right) +
                                     "' is not a container or iterable");
@@ -4623,6 +5324,46 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
                                 pythonTypeName(right) + "\") to tuple");
         return makeNone();
     }
+    if ((left.type == "bytes" || left.type == "bytearray") ||
+        (right.type == "bytes" || right.type == "bytearray")){
+        auto makeByteResult = [&](const std::string& raw, bool isBA){
+            value r = makeString(raw);
+            r.type = isBA ? "bytearray" : "bytes";
+            return r;
+        };
+        if (op == "+"){
+            bool leftByte = (left.type == "bytes" || left.type == "bytearray") && left.ptr;
+            bool rightByte = (right.type == "bytes" || right.type == "bytearray") && right.ptr;
+            if (leftByte && rightByte &&
+                (left.type == "bytearray" || right.type == "bytes")){
+                return makeByteResult(*static_cast<std::string*>(left.ptr) +
+                                      *static_cast<std::string*>(right.ptr),
+                                      left.type == "bytearray");
+            }
+            raiseError("TypeError", "can't concat " + pythonTypeName(right) +
+                                    " to " + (left.type == "bytearray" ? "bytearray" : "bytes"));
+            return makeNone();
+        }
+        if (op == "*"){
+            if ((left.type == "bytes" || left.type == "bytearray") && left.ptr &&
+                (right.type == "int" || right.type == "bool")){
+                return makeByteResult(repeatString(*static_cast<std::string*>(left.ptr), toInt(right)),
+                                      left.type == "bytearray");
+            }
+            if ((right.type == "bytes" || right.type == "bytearray") && right.ptr &&
+                (left.type == "int" || left.type == "bool")){
+                return makeByteResult(repeatString(*static_cast<std::string*>(right.ptr), toInt(left)),
+                                      right.type == "bytearray");
+            }
+            raiseError("TypeError", "can't multiply sequence by non-int of type '" +
+                                    pythonTypeName(left.type == "int" || left.type == "bool" ? right : left) + "'");
+            return makeNone();
+        }
+        raiseError("TypeError", "unsupported operand type(s) for " + op + ": '" +
+                                pythonTypeName(left) + "' and '" + pythonTypeName(right) + "'");
+        return makeNone();
+    }
+
     if (left.type == "str" || right.type == "str"){
         if (op == "%" && left.type == "str"){
             return percentFormat(left, right);
@@ -4665,6 +5406,103 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
             if (!replaced) result.push_back(item);
         }
         return makeDict(result);
+    }
+
+// 复数参与的四则运算: 另一侧为 int/float/bool 时先提升为复数
+// arithmetic with complex: promote int/float/bool operand to complex first
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠣᠷᠣᠯᠴᠠᠭᠰᠠᠨ ᠳᠥᠷᠪᠡᠨ ᠦᠢᠯᠡᠳᠦᠯ
+    {
+        double lcRe, lcIm, rcRe, rcIm;
+        bool leftCplx = complexParts(left, lcRe, lcIm);
+        bool rightCplx = complexParts(right, rcRe, rcIm);
+        if (leftCplx || rightCplx){
+            bool leftPlainNum = (left.type == "int" || left.type == "float" || left.type == "bool");
+            bool rightPlainNum = (right.type == "int" || right.type == "float" || right.type == "bool");
+            if ((leftCplx || leftPlainNum) && (rightCplx || rightPlainNum)){
+                double a = leftCplx ? lcRe : toFloat(left);
+                double b = leftCplx ? lcIm : 0.0;
+                double c = rightCplx ? rcRe : toFloat(right);
+                double d = rightCplx ? rcIm : 0.0;
+                if (op == "+") return makeComplex(a + c, b + d);
+                if (op == "-") return makeComplex(a - c, b - d);
+                if (op == "*") return makeComplex(a * c - b * d, a * d + b * c);
+
+// 复数除法: 与 CPython 相同的 Smith 算法, 保持符号零与舍入一致
+// complex division: same Smith algorithm as CPython, keeping signed zero and rounding
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠬᠤᠪᠢᠶᠠᠯᠭ᠎ᠠ
+                auto cquot = [&](double ar, double ai, double br, double bi,
+                                 double& outRe, double& outIm) -> bool {
+                    if (br == 0.0 && bi == 0.0) return false;
+                    if (std::fabs(br) >= std::fabs(bi)){
+                        double ratio = bi / br;
+                        double denom = br + bi * ratio;
+                        outRe = (ar + ai * ratio) / denom;
+                        outIm = (ai - ar * ratio) / denom;
+                    } else {
+                        double ratio = br / bi;
+                        double denom = br * ratio + bi;
+                        outRe = (ar * ratio + ai) / denom;
+                        outIm = (ai * ratio - ar) / denom;
+                    }
+                    return true;
+                };
+                if (op == "/"){
+                    double outRe, outIm;
+                    if (!cquot(a, b, c, d, outRe, outIm)){
+                        raiseError("ZeroDivisionError", "complex division by zero");
+                        return makeNone();
+                    }
+                    return makeComplex(outRe, outIm);
+                }
+                if (op == "**"){
+
+// 复数幂: 整数小指数重复相乘, 其余走极坐标公式, 与 CPython 一致
+// complex power: repeated multiplication for small integer exponents, polar form otherwise
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠵᠡᠷᠭᠡ
+                    bool intExp = (d == 0.0 && c == std::floor(c) && std::fabs(c) <= 100.0);
+                    bool baseZero = (a == 0.0 && b == 0.0);
+                    if (baseZero && (c < 0.0 || d != 0.0)){
+                        raiseError("ZeroDivisionError", "zero to a negative or complex power");
+                        return makeNone();
+                    }
+                    if (intExp){
+                        long long n = static_cast<long long>(c);
+                        unsigned long long e = (n < 0) ? static_cast<unsigned long long>(-n)
+                                                       : static_cast<unsigned long long>(n);
+                        double rRe = 1.0, rIm = 0.0;
+                        double fRe = a, fIm = b;
+                        while (e){
+                            if (e & 1){
+                                double tRe = rRe * fRe - rIm * fIm;
+                                rIm = rRe * fIm + rIm * fRe;
+                                rRe = tRe;
+                            }
+                            double tRe = fRe * fRe - fIm * fIm;
+                            fIm = fRe * fIm + fIm * fRe;
+                            fRe = tRe;
+                            e >>= 1;
+                        }
+                        if (n < 0){
+                            double outRe, outIm;
+                            if (!cquot(1.0, 0.0, rRe, rIm, outRe, outIm)){
+                                raiseError("ZeroDivisionError", "complex division by zero");
+                                return makeNone();
+                            }
+                            rRe = outRe;
+                            rIm = outIm;
+                        }
+                        return makeComplex(rRe, rIm);
+                    }
+                    if (baseZero) return makeComplex(0.0, 0.0);
+                    std::complex<double> power = std::pow(std::complex<double>(a, b),
+                                                          std::complex<double>(c, d));
+                    return makeComplex(power.real(), power.imag());
+                }
+            }
+            raiseError("TypeError", "unsupported operand type(s) for " + op + ": '" +
+                                    pythonTypeName(left) + "' and '" + pythonTypeName(right) + "'");
+            return makeNone();
+        }
     }
 
     bool leftNumber = (left.type == "int" || left.type == "float" || left.type == "bool");
@@ -4780,15 +5618,42 @@ value vm::applyBinary(const std::string& op, const value& left, const value& rig
 }
 
 function_t* vm::findFunction(const std::string& name){
-
-    for (auto it = script.functions.rbegin(); it != script.functions.rend(); ++it){
+    const script_t* active = currentScript ? currentScript : &script;
+    for (auto it = active->functions.rbegin(); it != active->functions.rend(); ++it){
         if (it->name == name) return const_cast<function_t*>(&*it);
     }
     return nullptr;
 }
 class_t* vm::findClass(const std::string& name){
-    for (auto& klass : script.classes){
-        if (klass.name == name) return &klass;
+    const script_t* active = currentScript ? currentScript : &script;
+    for (auto& klass : active->classes){
+        if (klass.name == name) return const_cast<class_t*>(&klass);
+    }
+    return nullptr;
+}
+
+// 判断指针是否落在某个函数向量内 (用于确定函数所属脚本)
+// Check whether a pointer lies inside a function vector (to find its owning script)
+static bool pointerInFunctionVector(const function_t* fn, const std::vector<function_t>& vec){
+    if (!fn || vec.empty()) return false;
+    const function_t* begin = vec.data();
+    const function_t* end = begin + vec.size();
+    std::less<const function_t*> less;
+    return !less(fn, begin) && less(fn, end);
+}
+
+const script_t* vm::findFunctionOwner(const function_t* fn) const {
+    if (!fn) return nullptr;
+    auto owns = [fn](const script_t& s){
+        if (pointerInFunctionVector(fn, s.functions)) return true;
+        for (auto& klass : s.classes){
+            if (pointerInFunctionVector(fn, klass.methods)) return true;
+        }
+        return false;
+    };
+    if (owns(script)) return &script;
+    for (auto& lib : scriptLibraries){
+        if (owns(lib.second)) return &lib.second;
     }
     return nullptr;
 }
@@ -4861,6 +5726,12 @@ void vm::resolveClassBase(class_t* klass){
             }
         } else if (inst->klass && inst->klass->name == "object"){
 
+        } else if (inst->klass){
+            const std::string& bn = inst->klass->name;
+            if (bn == "Enum" || bn == "IntEnum" || bn == "StrEnum" ||
+                bn == "Flag" || bn == "IntFlag"){
+                klass->builtinBase = "enum:" + bn;
+            }
         }
     }
 }
@@ -5229,6 +6100,29 @@ bool vm::isInstance(const value& obj, const value& target){
         }
     }
 
+    if (target.type == "native_object" && target.ptr){
+        auto* tk = static_cast<ffi_instance*>(target.ptr);
+        if (tk->klass){
+            const std::string& abc = tk->klass->name;
+            if (abc == "Number" || abc == "Complex" || abc == "Real" ||
+                abc == "Rational" || abc == "Integral"){
+                bool intLike = (obj.type == "int" || obj.type == "bool");
+                bool floatLike = (obj.type == "float");
+                bool complexLike = isComplexValue(obj);
+                bool fraction = false;
+                if (obj.type == "native_object" && obj.ptr){
+                    auto* oi = static_cast<ffi_instance*>(obj.ptr);
+                    if (oi->klass && oi->klass->name == "Fraction") fraction = true;
+                }
+                if (abc == "Number" || abc == "Complex")
+                    return intLike || floatLike || complexLike || fraction;
+                if (abc == "Real") return intLike || floatLike || fraction;
+                if (abc == "Rational") return intLike || fraction;
+                return intLike;
+            }
+        }
+    }
+
     const char* targetName = nullptr;
     if (target.type == "class" && target.ptr){
         targetName = static_cast<class_t*>(target.ptr)->name.c_str();
@@ -5266,9 +6160,28 @@ bool vm::truthy(const value& v) const {
     if (v.type == "int") return *static_cast<long long*>(v.ptr) != 0;
     if (v.type == "float") return *static_cast<double*>(v.ptr) != 0.0;
     if (v.type == "str") return !static_cast<std::string*>(v.ptr)->empty();
+    if (v.type == "bytes" || v.type == "bytearray")
+        return !static_cast<std::string*>(v.ptr)->empty();
     if (v.type == "list") return !static_cast<std::vector<value>*>(v.ptr)->empty();
     if (v.type == "tuple") return !static_cast<std::vector<value>*>(v.ptr)->empty();
     if (v.type == "dict") return !static_cast<dict_t*>(v.ptr)->empty();
+    if (v.type == "native_object" && v.ptr){
+        auto* inst = static_cast<ffi_instance*>(v.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__bool__")){
+            auto* self = const_cast<vm*>(this);
+            value result;
+            if (cffiCallMethod(*self, v, "__bool__", {}, result) && !self->hasError())
+                return self->truthy(result);
+            if (self->hasError()) self->clearPendingExceptionState();
+        }
+        if (inst && inst->klass && inst->klass->methods.count("__len__")){
+            auto* self = const_cast<vm*>(this);
+            value result;
+            if (cffiCallMethod(*self, v, "__len__", {}, result) && !self->hasError())
+                return self->toInt(result) != 0;
+            if (self->hasError()) self->clearPendingExceptionState();
+        }
+    }
     return true;
 }
 
@@ -5410,6 +6323,10 @@ value vm::getAttribute(const value& obj, const std::string& name){
                 if (dataIt != lib->data.end()){
                     value r = makeNone();
                     if (cffiCallData(*lib, name, *this, r)) return r;
+                }
+                auto classIt = lib->classes.find(name);
+                if (classIt != lib->classes.end()){
+                    return makeNativeObject(lib, &classIt->second, nullptr);
                 }
                 break;
             }
@@ -5645,6 +6562,13 @@ void vm::loadlib(const ffilib& library){
     cffiLibraries.push_back(new ffilib(library));
 }
 
+ffilib* vm::findCffiLibrary(const std::string& name){
+    for (auto* lib : cffiLibraries){
+        if (lib && lib->name == name) return lib;
+    }
+    return nullptr;
+}
+
 void vm::usestdlib(){
     loadlib(cffi_math_lib());
     loadlib(cffi_random_lib());
@@ -5663,6 +6587,58 @@ void vm::usestdlib(){
     loadlib(cffi_copy_lib());
     loadlib(cffi_operator_lib());
     loadlib(cffi_ctypes_lib());
+    loadlib(cffi_fnmatch_lib());
+    loadlib(cffi_colorsys_lib());
+    loadlib(cffi_html_lib());
+    loadlib(cffi_urllib_parse_lib());
+    loadlib(cffi_calendar_lib());
+    loadlib(cffi_textwrap_lib());
+    loadlib(cffi_graphlib_lib());
+    loadlib(cffi_secrets_lib());
+    loadlib(cffi_reprlib_lib());
+    loadlib(cffi_difflib_lib());
+    loadlib(cffi_getopt_lib());
+    loadlib(cffi_binascii_lib());
+    loadlib(cffi_struct_lib());
+    loadlib(cffi_array_lib());
+    loadlib(cffi_codecs_lib());
+    loadlib(cffi_pprint_lib());
+    loadlib(cffi_csv_lib());
+    loadlib(cffi_configparser_lib());
+    loadlib(cffi_tomllib_lib());
+    loadlib(cffi_io_lib());
+    loadlib(cffi_collections_lib());
+    loadlib(cffi_types_lib());
+    loadlib(cffi_enum_lib());
+    loadlib(cffi_numbers_lib());
+    loadlib(cffi_cmath_lib());
+    loadlib(cffi_fractions_lib());
+    loadlib(cffi_pathlib_lib());
+    loadlib(cffi_glob_lib());
+    loadlib(cffi_filecmp_lib());
+    loadlib(cffi_shutil_lib());
+    loadlib(cffi_tempfile_lib());
+    loadlib(cffi_atexit_lib());
+    loadlib(cffi_gc_lib());
+    loadlib(cffi_warnings_lib());
+    loadlib(cffi_sched_lib());
+    loadlib(cffi_queue_lib());
+    loadlib(cffi_contextvars_lib());
+    loadlib(cffi_timeit_lib());
+    loadlib(cffi_uuid_lib());
+    loadlib(cffi_http_cookies_lib());
+    loadlib(cffi_imghdr_lib());
+    loadlib(cffi_sndhdr_lib());
+    loadlib(cffi_wave_lib());
+    loadlib(cffi_argparse_lib());
+    loadlib(cffi_optparse_lib());
+    loadlib(cffi_logging_lib());
+    loadlib(cffi_traceback_lib());
+    loadlib(cffi_doctest_lib());
+    loadlib(cffi_unittest_lib());
+    loadlib(cffi_profile_lib());
+    loadlib(cffi_pickle_lib());
+    loadlib(cffi_marshal_lib());
 }
 void vm::loadpy(const script_t& libraryScript){
     std::string name = libraryScript.name;
@@ -5696,20 +6672,17 @@ void vm::executeScriptModule(const std::string& name){
         if (lib.first == name){
             executedScriptModules.insert(name);
 
-            script_t prevScript = std::move(script);
-            script = lib.second;
             const script_t* prevScriptPtr = currentScript;
-            currentScript = &script;
+            currentScript = &lib.second;
 
-            frames.push_back({currentFileName(), "<module>", 0, &script});
+            frames.push_back({currentFileName(), "<module>", 0, &lib.second});
 
             bool returned = false;
             value returnValue = makeNone();
-            executeBody(script.mainFunction.body, returned, returnValue);
+            executeBody(lib.second.mainFunction.body, returned, returnValue);
 
             frames.pop_back();
             currentScript = prevScriptPtr;
-            script = std::move(prevScript);
             return;
         }
     }
@@ -5934,13 +6907,19 @@ value vm::invoke(function_t* function, const std::vector<value>& args, value* se
     for (auto& e : keywordExtra){
         dictSet(keywordDict, makeString(e.first), e.second);
     }
+    // 函数所属脚本优先于调用点传入的脚本;
+    // 否则通过 from ... import 暴露出去的模块函数会丢失自己的模块上下文
+    // The owner script of the callee wins over the caller's script; otherwise
+    // module functions exported via `from ... import` lose their module context.
+    const script_t* ownerScript = findFunctionOwner(function);
+    const script_t* effectiveSource = ownerScript ? ownerScript : sourceScript;
     const script_t* previousScript = currentScript;
-    if (sourceScript) currentScript = sourceScript;
-    std::string frameFile = (sourceScript && !sourceScript->name.empty())
-                                ? sourceScript->name
+    if (effectiveSource) currentScript = effectiveSource;
+    std::string frameFile = (effectiveSource && !effectiveSource->name.empty())
+                                ? effectiveSource->name
                                 : currentFileName();
     int functionLine = function->body.empty() ? 0 : function->body[0].line;
-    frames.push_back({frameFile, function->name, functionLine, sourceScript});
+    frames.push_back({frameFile, function->name, functionLine, effectiveSource});
     recursionDepth++;
     globalNameStack.push_back(&function->globalNames);
     nonlocalNameStack.push_back(&function->nonlocalNames);
@@ -6252,12 +7231,8 @@ value vm::makeExceptionObject(const std::string& type, const std::string& msg,
 }
 
 
-static std::unordered_map<std::string, value>& builtinTypeCache(){
-    static std::unordered_map<std::string, value> cache;
-    return cache;
-}
 value vm::getBuiltinTypeObj(const std::string& typeName){
-    auto& cache = builtinTypeCache();
+    auto& cache = this->builtinTypeCache;
     auto it = cache.find(typeName);
     if (it != cache.end()) return it->second;
     for (auto* lib : cffiLibraries){
@@ -6269,11 +7244,28 @@ value vm::getBuiltinTypeObj(const std::string& typeName){
             ni->klass = nullptr;
             ni->typeName = typeName;
             ni->handle = fnIt->second;
-            value obj = makeDynamicObject(typeName, nullptr, nullptr, nullptr);
+            ni->isTypeObject = true;
+            value obj("native_object", keep(vk_native_object, ni), this);
             cache[typeName] = obj;
             return obj;
         }
         break;
+    }
+    static const std::set<std::string> kPureTypeNames = {
+        "NoneType", "ellipsis", "NotImplementedType", "type", "object",
+        "function", "generator", "coroutine", "async_generator", "method",
+        "builtin_function_or_method", "module", "code", "cell", "UnionType",
+        "slice", "property", "staticmethod", "classmethod", "memoryview",
+        "frame", "traceback", "mappingproxy"
+    };
+    if (kPureTypeNames.count(typeName)){
+        auto* ni = new ffi_instance();
+        ni->klass = nullptr;
+        ni->typeName = typeName;
+        ni->isTypeObject = true;
+        value obj("native_object", keep(vk_native_object, ni), this);
+        cache[typeName] = obj;
+        return obj;
     }
     return makeNone();
 }
@@ -6283,6 +7275,32 @@ class_t* vm::getClassOfScriptObject(const value& obj){
         return inst->klass;
     }
     return nullptr;
+}
+
+value vm::adoptClass(class_t* klass){
+    initializeClass(*klass);
+    return value("class", keep(vk_class, klass), this);
+}
+
+// 复数访问公共包装 (cmath 等模块使用)
+// public complex accessors (used by cmath etc.)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠨᠠᠢᠳᠠᠪᠤᠷᠢ ᠰᠢᠯᠲᠡ
+bool minipy::isComplexValueEx(const minipy::value& v){
+    return isComplexValue(v);
+}
+
+bool minipy::complexPartsEx(const minipy::value& v, double& real, double& imag){
+    return complexParts(v, real, imag);
+}
+
+bool minipy::closureFunctionCopy(const minipy::value& v, minipy::function_t& out){
+    if (v.type != "native_object" || v.ptr == nullptr) return false;
+    auto* inst = static_cast<minipy::ffi_instance*>(v.ptr);
+    if (!inst || inst->typeName != "closure" || inst->handle == nullptr) return false;
+    auto* ch = static_cast<closure_handle*>(inst->handle);
+    if (!ch || !ch->fn) return false;
+    out = *ch->fn;
+    return true;
 }
 
 void vm::clearPendingExceptionState(){
@@ -6301,6 +7319,17 @@ void vm::generatorResumeBody(GeneratorState* gs, value& out, bool asyncCompletio
         return;
     }
     gs->running = true;
+    // 恢复生成器/协程时, 切回其函数所属脚本, 保证模块内名称解析正确
+    // When resuming, switch back to the script that owns the generator function.
+    struct ScriptRestoreGuard{
+        const script_t*& slot;
+        const script_t* saved;
+        ~ScriptRestoreGuard(){ slot = saved; }
+    } scriptGuard{currentScript, currentScript};
+    {
+        const script_t* ownerScript = gs->fn ? findFunctionOwner(gs->fn) : nullptr;
+        if (ownerScript) currentScript = ownerScript;
+    }
     scopes.push_back(std::move(gs->localScope));
     globalNameStack.push_back(gs->globalNames);
     int functionLine = gs->fn && !gs->fn->body.empty() ? gs->fn->body[0].line : 0;
@@ -6458,6 +7487,365 @@ value vm::callBuiltinMethod(const std::string& method, value& target,
                                      const std::vector<value>& args, bool& handled,
                                      const std::map<std::string, value>& kwargs){
     handled = true;
+    if ((target.type == "bytes" || target.type == "bytearray") && target.ptr){
+        std::string raw = *static_cast<std::string*>(target.ptr);
+        bool isBA = (target.type == "bytearray");
+        auto mk = [&](const std::string& text) -> value {
+            value r = makeString(text);
+            r.type = isBA ? "bytearray" : "bytes";
+            return r;
+        };
+        auto bytesOf = [](const value& item) -> bool {
+            return item.type == "bytes" || item.type == "bytearray";
+        };
+        if (method == "decode"){
+            std::string encoding = args.empty() ? "utf-8" : toString(args[0]);
+            std::string enc;
+            for (char c : encoding)
+                enc.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+            if (enc == "utf-8" || enc == "utf8" || enc == "u8") return makeString(raw);
+            if (enc == "ascii" || enc == "us-ascii"){
+                for (size_t i = 0; i < raw.size(); ++i){
+                    unsigned char ch = static_cast<unsigned char>(raw[i]);
+                    if (ch >= 128){
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\x%02x", ch);
+                        raiseError("UnicodeDecodeError",
+                                   "'ascii' codec can't decode byte " + std::string(buf) +
+                                   " in position " + std::to_string(i) +
+                                   ": ordinal not in range(128)");
+                        return makeNone();
+                    }
+                }
+                return makeString(raw);
+            }
+            if (enc == "latin-1" || enc == "latin1" || enc == "iso-8859-1"){
+                std::string out;
+                for (unsigned char ch : raw) appendUtf8Codepoint(out, ch);
+                return makeString(out);
+            }
+            raiseError("LookupError", "unknown encoding: " + encoding);
+            return makeNone();
+        }
+        if (method == "hex"){
+            std::string out;
+            char buf[4];
+            for (unsigned char ch : raw){
+                std::snprintf(buf, sizeof(buf), "%02x", ch);
+                out += buf;
+            }
+            return makeString(out);
+        }
+        if (method == "upper" || method == "lower"){
+            std::string out = raw;
+            for (auto& c : out){
+                unsigned char ch = static_cast<unsigned char>(c);
+                if (ch < 128){
+                    c = static_cast<char>(method == "upper" ? std::toupper(ch)
+                                                             : std::tolower(ch));
+                }
+            }
+            return mk(out);
+        }
+        if (method == "strip" || method == "lstrip" || method == "rstrip"){
+            std::string chars = " \t\n\r\v\f";
+            if (!args.empty() && args[0].type != "none" && bytesOf(args[0]))
+                chars = *static_cast<std::string*>(args[0].ptr);
+            auto inset = [&](char c){ return chars.find(c) != std::string::npos; };
+            size_t b = 0, e = raw.size();
+            if (method != "rstrip") while (b < e && inset(raw[b])) ++b;
+            if (method != "lstrip") while (e > b && inset(raw[e - 1])) --e;
+            return mk(raw.substr(b, e - b));
+        }
+        if (method == "split" || method == "rsplit"){
+            long long maxsplit = -1;
+            if (args.size() >= 2) maxsplit = toInt(args[1]);
+            std::vector<value> parts;
+            bool hasSep = !args.empty() && args[0].type != "none" && bytesOf(args[0]);
+            if (!hasSep){
+                std::string sepChars = " \t\n\r\v\f";
+                std::vector<std::string> tmp;
+                if (maxsplit == 0){
+                    size_t b = 0;
+                    while (b < raw.size() && sepChars.find(raw[b]) != std::string::npos) ++b;
+                    size_t e = raw.size();
+                    while (e > b && sepChars.find(raw[e - 1]) != std::string::npos) --e;
+                    if (b < e) tmp.push_back(raw.substr(b, e - b));
+                } else if (method == "split"){
+                    size_t i = 0;
+                    long long splits = 0;
+                    while (i < raw.size()){
+                        while (i < raw.size() && sepChars.find(raw[i]) != std::string::npos) ++i;
+                        if (i >= raw.size()) break;
+                        if (maxsplit >= 0 && splits >= maxsplit){
+                            tmp.push_back(raw.substr(i));
+                            break;
+                        }
+                        size_t j = i;
+                        while (j < raw.size() && sepChars.find(raw[j]) == std::string::npos) ++j;
+                        tmp.push_back(raw.substr(i, j - i));
+                        splits++;
+                        i = j;
+                    }
+                } else {
+                    long long i = static_cast<long long>(raw.size()) - 1;
+                    long long end = i + 1;
+                    long long splits = 0;
+                    while (i >= 0){
+                        while (i >= 0 && sepChars.find(raw[static_cast<size_t>(i)]) != std::string::npos) --i;
+                        if (i < 0) break;
+                        if (maxsplit >= 0 && splits >= maxsplit){
+                            tmp.push_back(raw.substr(0, static_cast<size_t>(i + 1)));
+                            break;
+                        }
+                        long long j = i;
+                        while (j >= 0 && sepChars.find(raw[static_cast<size_t>(j)]) == std::string::npos) --j;
+                        tmp.push_back(raw.substr(static_cast<size_t>(j + 1),
+                                                 static_cast<size_t>(end - j - 1)));
+                        splits++;
+                        end = j + 1;
+                        i = j;
+                    }
+                    std::reverse(tmp.begin(), tmp.end());
+                }
+                for (auto& piece : tmp) parts.push_back(mk(piece));
+            } else {
+                std::string sep = *static_cast<std::string*>(args[0].ptr);
+                if (sep.empty()){
+                    raiseError("ValueError", "empty separator");
+                    return makeNone();
+                }
+                if (method == "split"){
+                    size_t pos = 0;
+                    long long splits = 0;
+                    while (true){
+                        if (maxsplit >= 0 && splits >= maxsplit){
+                            parts.push_back(mk(raw.substr(pos)));
+                            break;
+                        }
+                        size_t hit = raw.find(sep, pos);
+                        if (hit == std::string::npos){
+                            parts.push_back(mk(raw.substr(pos)));
+                            break;
+                        }
+                        parts.push_back(mk(raw.substr(pos, hit - pos)));
+                        pos = hit + sep.size();
+                        splits++;
+                    }
+                } else {
+                    std::vector<std::string> tmp;
+                    size_t end = raw.size();
+                    long long splits = 0;
+                    while (true){
+                        if (maxsplit >= 0 && splits >= maxsplit){
+                            tmp.push_back(raw.substr(0, end));
+                            break;
+                        }
+                        size_t hit = end == 0 ? std::string::npos : raw.rfind(sep, end - 1);
+                        if (hit == std::string::npos || hit + sep.size() > end){
+                            tmp.push_back(raw.substr(0, end));
+                            break;
+                        }
+                        tmp.push_back(raw.substr(hit + sep.size(), end - hit - sep.size()));
+                        end = hit;
+                        splits++;
+                    }
+                    std::reverse(tmp.begin(), tmp.end());
+                    for (auto& piece : tmp) parts.push_back(mk(piece));
+                }
+            }
+            return makeList(parts);
+        }
+        if (method == "join"){
+            std::vector<value> items;
+            if (!args.empty()) materializeIterable(args[0], items);
+            if (hasError()) return makeNone();
+            std::string out;
+            for (size_t i = 0; i < items.size(); ++i){
+                if (!bytesOf(items[i])){
+                    raiseError("TypeError", "sequence item " + std::to_string(i) +
+                                            ": expected a bytes-like object, " +
+                                            pythonTypeName(items[i]) + " found");
+                    return makeNone();
+                }
+                if (i > 0) out += raw;
+                out += *static_cast<std::string*>(items[i].ptr);
+            }
+            return mk(out);
+        }
+        if (method == "replace"){
+            if (args.size() < 2){
+                raiseError("TypeError", "replace() takes at least 2 arguments (" +
+                                        std::to_string(args.size()) + " given)");
+                return makeNone();
+            }
+            if (!bytesOf(args[0]) || !bytesOf(args[1])){
+                raiseError("TypeError", "replace() argument must be a bytes-like object");
+                return makeNone();
+            }
+            std::string oldS = *static_cast<std::string*>(args[0].ptr);
+            std::string newS = *static_cast<std::string*>(args[1].ptr);
+            long long count = -1;
+            if (args.size() >= 3) count = toInt(args[2]);
+            std::string out;
+            if (oldS.empty()){
+                long long done = 0;
+                auto canDo = [&](){ return count < 0 || done < count; };
+                if (canDo()){ out += newS; done++; }
+                for (size_t i = 0; i < raw.size(); ++i){
+                    out.push_back(raw[i]);
+                    if (canDo()){ out += newS; done++; }
+                }
+                return mk(out);
+            }
+            size_t pos = 0;
+            long long done = 0;
+            while (true){
+                size_t hit = raw.find(oldS, pos);
+                if (hit == std::string::npos || (count >= 0 && done >= count)){
+                    out += raw.substr(pos);
+                    break;
+                }
+                out += raw.substr(pos, hit - pos);
+                out += newS;
+                pos = hit + oldS.size();
+                done++;
+            }
+            return mk(out);
+        }
+        if (method == "find" || method == "rfind" ||
+            method == "index" || method == "rindex" || method == "count"){
+            if (args.empty()){
+                raiseError("TypeError", method + "() takes at least 1 argument (0 given)");
+                return makeNone();
+            }
+            if (!bytesOf(args[0])){
+                raiseError("TypeError", "a bytes-like object is required, not '" +
+                                        pythonTypeName(args[0]) + "'");
+                return makeNone();
+            }
+            std::string needle = *static_cast<std::string*>(args[0].ptr);
+            long long start = 0, end = static_cast<long long>(raw.size());
+            if (args.size() >= 2) start = toInt(args[1]);
+            if (args.size() >= 3) end = toInt(args[2]);
+            if (start < 0) start += static_cast<long long>(raw.size());
+            if (end < 0) end += static_cast<long long>(raw.size());
+            if (start < 0) start = 0;
+            if (end > static_cast<long long>(raw.size())) end = static_cast<long long>(raw.size());
+            std::string region = (start < end)
+                ? raw.substr(static_cast<size_t>(start), static_cast<size_t>(end - start))
+                : std::string();
+            if (method == "count"){
+                long long n = 0;
+                if (needle.empty()){
+                    n = static_cast<long long>(region.size()) + 1;
+                } else {
+                    size_t pos = 0;
+                    while ((pos = region.find(needle, pos)) != std::string::npos){
+                        n++;
+                        pos += needle.size();
+                    }
+                }
+                return makeInt(n);
+            }
+            size_t hit = (method == "rfind" || method == "rindex")
+                ? region.rfind(needle) : region.find(needle);
+            if (hit == std::string::npos){
+                if (method == "index" || method == "rindex"){
+                    raiseError("ValueError", "subsection not found");
+                    return makeNone();
+                }
+                return makeInt(-1);
+            }
+            return makeInt(start + static_cast<long long>(hit));
+        }
+        if (method == "startswith" || method == "endswith"){
+            if (args.empty()){
+                raiseError("TypeError", method + "() takes at least 1 argument (0 given)");
+                return makeNone();
+            }
+            long long start = 0, end = static_cast<long long>(raw.size());
+            if (args.size() >= 2) start = toInt(args[1]);
+            if (args.size() >= 3) end = toInt(args[2]);
+            if (start < 0) start += static_cast<long long>(raw.size());
+            if (end < 0) end += static_cast<long long>(raw.size());
+            if (start < 0) start = 0;
+            if (end > static_cast<long long>(raw.size())) end = static_cast<long long>(raw.size());
+            std::string region = (start < end)
+                ? raw.substr(static_cast<size_t>(start), static_cast<size_t>(end - start))
+                : std::string();
+            bool ok = false;
+            auto testOne = [&](const value& affix) -> bool {
+                if (!bytesOf(affix)){
+                    raiseError("TypeError", "startswith/endswith first arg must be bytes or "
+                                            "a tuple of bytes, not '" +
+                                            pythonTypeName(affix) + "'");
+                    return false;
+                }
+                std::string s = *static_cast<std::string*>(affix.ptr);
+                if (s.size() > region.size()) return false;
+                if (method == "startswith")
+                    return region.compare(0, s.size(), s) == 0;
+                return region.compare(region.size() - s.size(), s.size(), s) == 0;
+            };
+            if (args[0].type == "tuple" || args[0].type == "list"){
+                auto* items = static_cast<std::vector<value>*>(args[0].ptr);
+                for (auto& item : *items){
+                    if (testOne(item)){ ok = true; break; }
+                }
+            } else {
+                ok = testOne(args[0]);
+            }
+            if (hasError()) return makeNone();
+            return makeBool(ok);
+        }
+        if (method == "removeprefix" || method == "removesuffix"){
+            if (args.empty() || !bytesOf(args[0])){
+                raiseError("TypeError", method + "() argument must be a bytes-like object");
+                return makeNone();
+            }
+            std::string affix = *static_cast<std::string*>(args[0].ptr);
+            if (method == "removeprefix"){
+                if (raw.compare(0, affix.size(), affix) == 0)
+                    return mk(raw.substr(affix.size()));
+                return mk(raw);
+            }
+            if (affix.size() <= raw.size() &&
+                raw.compare(raw.size() - affix.size(), affix.size(), affix) == 0)
+                return mk(raw.substr(0, raw.size() - affix.size()));
+            return mk(raw);
+        }
+        if (method == "isalpha" || method == "isdigit" ||
+            method == "isspace" || method == "isupper" ||
+            method == "islower" || method == "isascii"){
+            bool result = !raw.empty();
+            bool hasCased = false;
+            for (unsigned char ch : raw){
+                if (method == "isascii"){
+                    if (ch >= 128){ result = false; break; }
+                    continue;
+                }
+                if (method == "isspace"){ result = result && std::isspace(ch) != 0; }
+                else if (method == "isdigit"){ result = result && std::isdigit(ch) != 0; }
+                else if (method == "isalpha"){ result = result && std::isalpha(ch) != 0; }
+                else if (method == "isupper"){
+                    if (std::isalpha(ch)) hasCased = true;
+                    if (std::islower(ch)) result = false;
+                } else if (method == "islower"){
+                    if (std::isalpha(ch)) hasCased = true;
+                    if (std::isupper(ch)) result = false;
+                }
+            }
+            if ((method == "isupper" || method == "islower") && !hasCased) result = false;
+            return makeBool(result);
+        }
+        if (method == "copy"){
+            return mk(raw);
+        }
+        handled = false;
+        return makeNone();
+    }
+
     if (target.type == "str" && target.ptr){
         std::string text = *static_cast<std::string*>(target.ptr);
         if (method == "upper"){
@@ -7258,6 +8646,22 @@ value vm::callBuiltinMethod(const std::string& method, value& target,
 
 void vm::materializeIterable(const value& v, std::vector<value>& items){
     if (v.ptr == nullptr) return;
+    if (v.type == "class"){
+        auto* klass = static_cast<class_t*>(v.ptr);
+        if (klass->builtinBase.rfind("enum:", 0) == 0 && klass->attributes){
+            auto* attrs = static_cast<std::map<std::string, value>*>(klass->attributes);
+            auto it = attrs->find("_member_names_");
+            if (it != attrs->end() && it->second.type == "list" && it->second.ptr){
+                for (auto& nameVal : *static_cast<std::vector<value>*>(it->second.ptr)){
+                    if (nameVal.type != "str") continue;
+                    auto mit = attrs->find(*static_cast<std::string*>(nameVal.ptr));
+                    if (mit != attrs->end() && mit->second.type == "native_object")
+                        items.push_back(mit->second);
+                }
+            }
+        }
+        return;
+    }
     if (v.type == "list" || v.type == "tuple"){
         items = *static_cast<std::vector<value>*>(v.ptr);
         return;
@@ -7300,6 +8704,12 @@ void vm::materializeIterable(const value& v, std::vector<value>& items){
         for (char c : toString(v)) items.push_back(makeString(std::string(1, c)));
         return;
     }
+    if (v.type == "bytes" || v.type == "bytearray"){
+        auto* raw = static_cast<std::string*>(v.ptr);
+        for (unsigned char ch : *raw)
+            items.push_back(makeInt(static_cast<long long>(ch)));
+        return;
+    }
     if (v.type == "int"){
         long long count = toInt(v);
         for (long long i = 0; i < count; ++i) items.push_back(makeInt(i));
@@ -7322,6 +8732,40 @@ void vm::materializeIterable(const value& v, std::vector<value>& items){
 
                 return;
             }
+        }
+        if (inst && inst->klass &&
+            inst->klass->methods.find("__iter__") != inst->klass->methods.end() &&
+            inst->klass->methods.find("__next__") == inst->klass->methods.end()){
+            value itResult;
+            if (cffiCallMethod(*this, v, "__iter__", {}, itResult) && !hasError()){
+                materializeIterable(itResult, items);
+            }
+            if (hasError()) clearPendingExceptionState();
+            return;
+        }
+        if (inst && inst->klass &&
+            inst->klass->methods.find("__next__") != inst->klass->methods.end()){
+            value iterObj = v;
+            if (inst->klass->methods.find("__iter__") != inst->klass->methods.end()){
+                value itResult;
+                if (cffiCallMethod(*this, v, "__iter__", {}, itResult) &&
+                    !hasError() && itResult.type == "native_object" && itResult.ptr)
+                    iterObj = itResult;
+                if (hasError()) clearPendingExceptionState();
+            }
+            while (true){
+                value item;
+                if (!cffiCallMethod(*this, iterObj, "__next__", {}, item)) break;
+                if (hasError()){
+                    if (exceptionType() == "StopIteration"){
+                        clearPendingExceptionState();
+                        return;
+                    }
+                    return;
+                }
+                items.push_back(item);
+            }
+            return;
         }
     }
 
@@ -7369,9 +8813,10 @@ void vm::materializeIterable(const value& v, std::vector<value>& items){
 
 value vm::invokeAny(value callee, std::vector<value> args){
     if (failed) return makeNone();
+    const script_t* activeScript = currentScript ? currentScript : &script;
     if (callee.type == "function" && callee.ptr){
         auto* func = static_cast<function_t*>(callee.ptr);
-        return invoke(func, args, nullptr, &script, func->name);
+        return invoke(func, args, nullptr, activeScript, func->name);
     }
     if (callee.type == "native_method" && callee.ptr){
 
@@ -7413,7 +8858,7 @@ value vm::invokeAny(value callee, std::vector<value> args){
             size_t capIdx = scopes.size();
             scopes.push_back(ch->captures);
             captureScopeIndices.push_back(capIdx);
-            value result = invoke(ch->fn, args, nullptr, &script, ch->fn->name);
+            value result = invoke(ch->fn, args, nullptr, activeScript, ch->fn->name);
             captureScopeIndices.pop_back();
             ch->captures = scopes.back();
             scopes.pop_back();
@@ -7456,8 +8901,9 @@ value vm::invokeAny(value callee, std::vector<value> args){
     if (callee.type == "class" && callee.ptr){
         auto* klass = static_cast<class_t*>(callee.ptr);
 
-
-
+        if (klass->builtinBase.rfind("enum:", 0) == 0){
+            return enumClassCall(*this, *klass, args);
+        }
 
         value instan;
 
@@ -7518,7 +8964,10 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
                             const std::map<std::string, value>& kwargs){
     if (failed) return makeNone();
 
-
+    // 被调函数/类所属的脚本 = 当前正在执行的脚本 (模块函数调用时不能退回主脚本)
+    // The callee's owning script is the currently executing one; do not fall
+    // back to the main script when we are inside an imported module.
+    const script_t* callScript = currentScript ? currentScript : &script;
 
     bool isSimpleName = !funcName.empty() && funcName[0] != '\0' &&
         (std::isalpha(static_cast<unsigned char>(funcName[0])) || funcName[0] == '_');
@@ -7553,6 +9002,17 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
                 raiseError("KeyError", pythonRepr(*this, key));
                 return makeNone();
             }
+            return makeNone();
+        }
+        if (container.type == "native_object" && container.ptr){
+            auto* ninst = static_cast<ffi_instance*>(container.ptr);
+            if (ninst->klass && ninst->klass->methods.count("__delitem__")){
+                value r;
+                cffiCallMethod(*this, container, "__delitem__", {key}, r);
+                return makeNone();
+            }
+            raiseError("TypeError", "'" + pythonTypeName(container) +
+                                    "' object doesn't support item deletion");
             return makeNone();
         }
         if (container.type == "list" && container.ptr){
@@ -7694,6 +9154,11 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
                     if (!exists) result->push_back({key, fill});
                 }
                 return value("dict", keep(vk_dict, result), this);
+            }
+            if (!instance->klass && instance->library){
+                value memberValue = getAttribute(target, member);
+                if (failed) return makeNone();
+                return invokeAny(memberValue, args);
             }
             value result = makeNone();
             if (cffiCallMethod(*this, target, member, args, result, kwargs)) return result;
@@ -7872,6 +9337,10 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
     class_t* klass = findClass(funcName);
     if (klass){
 
+        if (klass->builtinBase.rfind("enum:", 0) == 0){
+            return enumClassCall(*this, *klass, args);
+        }
+
         if (klass->baseName.find("Structure") != std::string::npos){
             auto* info = new CtypesStructInfo();
             info->totalSize = 4096;
@@ -7976,7 +9445,7 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
             clsSelf.ptr = klass;
             std::vector<value> newArgs = {clsSelf};
             newArgs.insert(newArgs.end(), args.begin(), args.end());
-            instance = invoke(newMethod, newArgs, &clsSelf, &script, klass->name + ".__new__", kwargs);
+            instance = invoke(newMethod, newArgs, &clsSelf, callScript, klass->name + ".__new__", kwargs);
         } else {
 
             instance = makeObject(klass);
@@ -7986,7 +9455,7 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
             if (inst->klass == klass){
                 function_t* init = findMethod(klass, "__init__");
                 if (init){
-                    invoke(init, args, &instance, &script, klass->name + ".__init__", kwargs);
+                    invoke(init, args, &instance, callScript, klass->name + ".__init__", kwargs);
                 } else if (inst->container.type == "dict"){
                     fillContainer(*this, static_cast<dict_t*>(inst->container.ptr),
                                   nullptr, args, kwargs);
@@ -8016,7 +9485,7 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
                 size_t capIdx = scopes.size();
                 scopes.push_back(ch->captures);
                 captureScopeIndices.push_back(capIdx);
-                value result = invoke(ch->fn, args, nullptr, &script, ch->fn->name, kwargs);
+                value result = invoke(ch->fn, args, nullptr, callScript, ch->fn->name, kwargs);
                 captureScopeIndices.pop_back();
                 ch->captures = scopes.back();
                 scopes.pop_back();
@@ -8055,18 +9524,21 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
 
         if (variablePtr && variablePtr->type == "function" && variablePtr->ptr){
             auto* cachedFunc = static_cast<function_t*>(variablePtr->ptr);
-            return invoke(cachedFunc, args, nullptr, &script, cachedFunc->name, kwargs);
+            return invoke(cachedFunc, args, nullptr, callScript, cachedFunc->name, kwargs);
         }
 
         if (variablePtr && variablePtr->type == "class" && variablePtr->ptr){
             auto* klass = static_cast<class_t*>(variablePtr->ptr);
+            if (klass->builtinBase.rfind("enum:", 0) == 0){
+                return enumClassCall(*this, *klass, args);
+            }
             value instance;
 
             function_t* newMethod = findMethod(klass, "__new__");
             if (newMethod){
                 value klassData;
                 klassData.type = "class"; klassData.ptr = klass;
-                value r = invoke(newMethod, args, nullptr, &script, klass->name + ".__new__", kwargs);
+                value r = invoke(newMethod, args, nullptr, callScript, klass->name + ".__new__", kwargs);
                 if (!hasError() && r.type == "object" && r.ptr){
                     instance = r;
                 } else if (!hasError()){
@@ -8084,12 +9556,20 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
                 function_t* init = findMethod(klass, "__init__");
                 if (init){
                     value selfCopy = instance;
-                    invoke(init, args, &selfCopy, &script, klass->name + ".__init__", kwargs);
+                    invoke(init, args, &selfCopy, callScript, klass->name + ".__init__", kwargs);
                 } else if (!args.empty()){
                     raiseError("TypeError", klass->name + "() takes no arguments");
                 }
             }
             return instance;
+        } else if (variablePtr && variablePtr->type == "native_object" && variablePtr->ptr){
+            auto* ni = static_cast<ffi_instance*>(variablePtr->ptr);
+            if (ni->klass && ni->library){
+                value instance = makeNone();
+                cffiCallConstructor(*ni->library, *ni->klass, *this, args, instance, kwargs);
+                return instance;
+            }
+            return invokeAny(*variablePtr, args);
         } else if (variablePtr){
             raiseError("TypeError", "'" + pythonTypeName(*variablePtr) + "' object is not callable");
             return makeNone();
@@ -8127,7 +9607,7 @@ value vm::callFunc(std::string funcName, std::vector<value> args,
         raiseError("NameError", message);
         return makeNone();
     }
-    return invoke(function, args, nullptr, &script, funcName, kwargs);
+    return invoke(function, args, nullptr, callScript, funcName, kwargs);
 }
 
 
@@ -8154,33 +9634,67 @@ static bool pydReadFileBytes(const std::string& path, std::vector<unsigned char>
 // pyd locate file
 // pyd Locate ᠪᠢᠴᠢᠭ
 static bool pydLocateFile(const std::string& moduleName, std::string& foundPath){
+    const char separator = mpPathSeparator();
     std::string relative = moduleName;
     for (auto& c : relative){
-        if (c == '.') c = '\\';
+        if (c == '.') c = separator;
     }
+
+// 搜索顺序: 当前工作目录优先, 其次可执行文件所在目录, 与 CPython 一致
+// Search order: current working directory first, then the executable directory, like CPython
+// ᠬᠠᠢᠬᠤ ᠵᠠᠷᠴᠢᠮ: ᠡᠬᠢᠨ᠎ᠡ ᠠᠵᠢᠯᠤᠨ ᠦ ᠭᠠᠵᠠᠷ
     std::vector<std::string> dirs;
     dirs.push_back("");
-    char exePath[MAX_PATH] = {0};
-    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH) > 0){
-        std::string exe(exePath);
-        size_t slash = exe.find_last_of("\\/");
-        if (slash != std::string::npos) dirs.push_back(exe.substr(0, slash + 1));
-    }
-    for (auto& dir : dirs){
-        std::string exact = dir + relative + ".pyd";
-        FILE* fp = std::fopen(exact.c_str(), "rb");
-        if (fp){
-            std::fclose(fp);
-            foundPath = exact;
-            return true;
+    std::string exeDir = mpExecutableDirectory();
+    if (!exeDir.empty()) dirs.push_back(exeDir);
+
+// 平台扩展模块后缀, Windows 为 pyd, 类 Unix 为共享库
+// Platform extension suffixes: pyd on Windows, shared objects elsewhere
+// ᠲᠠᠯᠠᠪᠠᠢ ᠶᠢᠨ ᠨᠡᠮᠡᠯᠲᠡ ᠬᠡᠰᠡᠭ
+#if defined(MINIPY_OS_WINDOWS)
+    std::vector<std::string> suffixes = {".pyd"};
+#elif defined(MINIPY_OS_MACOS) || defined(MINIPY_OS_IOS)
+    std::vector<std::string> suffixes = {".dylib", ".so"};
+#else
+    std::vector<std::string> suffixes = {".so"};
+#endif
+
+    std::string baseName = relative;
+    size_t cut = baseName.find_last_of("/\\");
+    if (cut != std::string::npos) baseName = baseName.substr(cut + 1);
+
+    for (const auto& dir : dirs){
+        std::string prefixPath = dir.empty() ? std::string() : (dir + separator);
+
+// 先找完全同名的文件, 保持原有优先级
+// First look for an exact-name file, keeping the original priority
+// ᠡᠬᠢᠨ᠎ᠡ ᠳᠠᠭᠠᠷᠢᠯᠳᠤᠨ᠎ᠠ ᠰᠠᠪᠠᠷᠢ
+        for (const auto& suffix : suffixes){
+            std::string exact = prefixPath + relative + suffix;
+            FILE* fp = std::fopen(exact.c_str(), "rb");
+            if (fp){
+                std::fclose(fp);
+                foundPath = exact;
+                return true;
+            }
         }
-        WIN32_FIND_DATAA findData;
-        std::string pattern = dir + relative + ".cp*.pyd";
-        HANDLE handle = FindFirstFileA(pattern.c_str(), &findData);
-        if (handle != INVALID_HANDLE_VALUE){
-            foundPath = dir + std::string(findData.cFileName);
-            FindClose(handle);
-            return true;
+
+// 再按 模块名.标签.后缀 的形式匹配带 ABI 标签的扩展模块
+// Then match ABI-tagged modules of the form name.tag.suffix
+// ᠳᠠᠷᠠᠭ᠎ᠠ ᠨᠡᠷᠡ.ᠲᠡᠮᠳᠡᠭ.ᠨᠡᠮᠡᠯᠲᠡ ᠬᠡᠰᠡᠭ ᠢ ᠬᠠᠢᠨ᠎ᠠ
+        std::vector<mpDirEntry> entries = mpListDirectory(dir.empty() ? std::string(".") : dir);
+        for (const auto& entry : entries){
+            std::string fileName = entry.name;
+            if (fileName.size() <= baseName.size() + 1) continue;
+            if (fileName.compare(0, baseName.size(), baseName) != 0) continue;
+            if (fileName[baseName.size()] != '.') continue;
+            for (const auto& suffix : suffixes){
+                if (fileName.size() >= suffix.size() &&
+                    fileName.compare(fileName.size() - suffix.size(), suffix.size(), suffix) == 0){
+                    foundPath = prefixPath + fileName;
+                    return true;
+                }
+            }
         }
     }
     return false;
@@ -8677,22 +10191,22 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
 
             if (ins.operands.size() >= 2){
                 value source = evalExpr(ins.operands[0]);
-                if (failed) return;
+                if (failed) goto top_of_loop;
                 std::vector<std::string> targets(ins.operands.begin() + 1, ins.operands.end());
                 unpackValues(source, targets);
-                if (failed) return;
+                if (failed) goto top_of_loop;
             }
         } else if (ins.operation == eop_expr){
 
             if (!ins.operands.empty()){
                 evalExpr(ins.operands[0]);
-                if (failed) return;
+                if (failed) goto top_of_loop;
             }
         } else if (ins.operation == eop_delslice){
 
             if (ins.operands.size() >= 2){
                 value base = evalExpr(ins.operands[0]);
-                if (failed) return;
+                if (failed) goto top_of_loop;
                 std::vector<value>* lst = nullptr;
                 if (base.type == "list" && base.ptr){
                     lst = static_cast<std::vector<value>*>(base.ptr);
@@ -8732,7 +10246,7 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 std::string rhsText = ins.operands[2];
                 value left = evalExpr(varName);
                 value right = evalExpr(rhsText);
-                if (failed) return;
+                if (failed) goto top_of_loop;
 
                 auto [inplaceHandled, inplaceResult] = tryMagicInplaceOp(*this, op, left, right);
                 if (inplaceHandled){
@@ -8740,7 +10254,7 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 } else {
 
                     value result = applyBinary(op, left, right);
-                    if (failed) return;
+                    if (failed) goto top_of_loop;
                     assignTarget(varName, result);
                 }
             }
@@ -8750,8 +10264,9 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 std::string baseName = ins.operands[0];
                 std::string member = ins.operands[1];
                 value base = evalExpr(baseName);
-                if (failed) return;
+                if (failed) goto top_of_loop;
                 std::string attrName = member;
+                bool delattrDone = false;
                 if (base.type == "object" && base.ptr){
                     auto* inst = static_cast<instance*>(base.ptr);
 
@@ -8762,31 +10277,40 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                             value selfCopy = base;
                             value nameStr = makeString(attrName);
                             (void)invoke(delattrMethod, {nameStr}, &selfCopy);
-                            if (!hasError()) return;
-                            restoreErrorState(snap);
+                            if (!hasError()) delattrDone = true;
+                            else restoreErrorState(snap);
                         }
                     }
 
-                    {
+                    if (!delattrDone){
                         value attrDict("dict", inst->attributes, this);
                         if (dictRemove(attrDict, makeString(attrName))){
-                            return;
+                            delattrDone = true;
                         }
                     }
 
-                    if (inst->klass && inst->klass->attributes){
+                    if (!delattrDone && inst->klass && inst->klass->attributes){
                         auto* klassAttrs = static_cast<std::map<std::string, value>*>(inst->klass->attributes);
                         auto clsIt = klassAttrs->find(attrName);
                         if (clsIt != klassAttrs->end()){
                             klassAttrs->erase(clsIt);
-                            return;
+                            delattrDone = true;
                         }
                     }
-                    raiseError("AttributeError", "'" + (inst->klass ? inst->klass->name : "object") +
-                                                "' object has no attribute '" + attrName + "'");
-                    return;
-                }
-                if (base.type == "class" && base.ptr){
+                    if (!delattrDone)
+                        raiseError("AttributeError", "'" + (inst->klass ? inst->klass->name : "object") +
+                                                    "' object has no attribute '" + attrName + "'");
+                } else if (base.type == "native_object" && base.ptr){
+                    auto* ninst = static_cast<ffi_instance*>(base.ptr);
+                    auto it = ninst->attributes.find(attrName);
+                    if (it != ninst->attributes.end()){
+                        ninst->attributes.erase(it);
+                        delattrDone = true;
+                    } else {
+                        raiseError("AttributeError", "'" + (ninst->klass ? ninst->klass->name : ninst->typeName) +
+                                                    "' object has no attribute '" + attrName + "'");
+                    }
+                } else if (base.type == "class" && base.ptr){
 
                     auto* klass = static_cast<class_t*>(base.ptr);
                     if (klass->attributes){
@@ -8794,15 +10318,17 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                         auto it = klassAttrs->find(attrName);
                         if (it != klassAttrs->end()){
                             klassAttrs->erase(it);
-                            return;
+                            delattrDone = true;
                         }
                     }
-                    raiseError("AttributeError", "type object '" + klass->name +
-                                                "' has no attribute '" + attrName + "'");
-                    return;
+                    if (!delattrDone)
+                        raiseError("AttributeError", "type object '" + klass->name +
+                                                    "' has no attribute '" + attrName + "'");
+                } else {
+                    raiseError("AttributeError", "'" + pythonTypeName(base) +
+                                                "' object has no attribute '" + attrName + "'");
                 }
-                raiseError("AttributeError", "'" + pythonTypeName(base) +
-                                            "' object has no attribute '" + attrName + "'");
+                if (failed) goto top_of_loop;
             }
         } else if (ins.operation == eop_delvar){
 
@@ -9094,7 +10620,17 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
                 }
 
                 if (alias != moduleName && !failed){
-                    setVariable(alias, makeNone());
+                    for (auto* lib : cffiLibraries){
+                        if (lib && lib->name == moduleName){
+                            ffi_instance* moduleObj = new ffi_instance();
+                            moduleObj->library = lib;
+                            moduleObj->klass = nullptr;
+                            moduleObj->typeName = moduleName;
+                            setVariable(alias, value("native_object",
+                                                     keep(vk_native_object, moduleObj), this));
+                            break;
+                        }
+                    }
                 }
 
             }
@@ -9154,7 +10690,11 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
 
                         auto classIt = lib->classes.find(memberName);
                         if (classIt != lib->classes.end()){
-                            setVariable(alias, makeNone());
+                            ffi_instance* classObj = new ffi_instance();
+                            classObj->library = lib;
+                            classObj->klass = &classIt->second;
+                            setVariable(alias, value("native_object",
+                                                     keep(vk_native_object, classObj), this));
                             break;
                         }
                         break;
@@ -9240,8 +10780,9 @@ void vm::executeBody(std::vector<execute_t>& body, bool& returned, value& return
 
             if (!ins.operands.empty()){
                 size_t index = static_cast<size_t>(std::strtoull(ins.operands[0].c_str(), nullptr, 10));
-                if (index < script.classes.size()){
-                    class_t& klass = script.classes[index];
+                const script_t* activeScript = currentScript ? currentScript : &script;
+                if (index < activeScript->classes.size()){
+                    class_t& klass = const_cast<class_t&>(activeScript->classes[index]);
                     initializeClass(klass);
                     if (failed) goto top_of_loop;
                     if (ins.operands.size() >= 2){
@@ -9426,6 +10967,10 @@ bool vm::initializeClass(class_t& klass){
             if (methodNames.count(kv.first) == 0){
                 (*attrs)[kv.first] = kv.second;
             }
+        }
+
+        if (klass.builtinBase.rfind("enum:", 0) == 0){
+            applyEnumTransform(*this, klass);
         }
 
         {
@@ -10653,7 +12198,10 @@ static void Pyd_PyErr_Format(void* excType, const char* fmt, ...){
 // pyd py err set exc from windows err
 // Pyd Py Err ᠨᠢᠳᠡᠳᠡᠯ ᠰᠡᠲ Exc ᠡᠴᠡ Windows Err
 static void Pyd_PyErr_SetExcFromWindowsErr(void* excType, int ierr){
-    int code = ierr ? ierr : static_cast<int>(GetLastError());
+// 未显式给出错误码时读取当前平台的系统错误码
+// Read the platform system error code when none is supplied
+// ᠲᠣᠭ᠎ᠠ ᠦᠭᠡᠢ ᠪᠣᠯᠤᠭᠰᠠᠨ ᠳᠤ ᠲᠠᠯᠠᠪᠠᠢ ᠶᠢᠨ ᠠᠯᠳᠠᠭ᠎ᠠ ᠤᠨ ᠳᠤᠭ᠎ᠠ ᠢ ᠤᠩᠰᠢᠨ᠎ᠠ
+    int code = ierr ? ierr : static_cast<int>(mpLastError());
     pydSetError(static_cast<PydObj*>(excType), "Windows error " + std::to_string(code));
 }
 
@@ -11147,6 +12695,7 @@ struct PydImageInfo{
 // pyd ᠬᠠᠯᠠᠬᠤ Export Proc
 static void* pydGetExportProc(void* base, const char* procName){
     if (!base || !procName) return nullptr;
+#if defined(MINIPY_OS_WINDOWS)
     unsigned char* image = static_cast<unsigned char*>(base);
     int lfanew = *reinterpret_cast<int*>(image + 0x3c);
     unsigned char* nt = image + lfanew;
@@ -11174,11 +12723,16 @@ static void* pydGetExportProc(void* base, const char* procName){
         }
     }
     return nullptr;
+#else
+    return mpGetProcAddress(reinterpret_cast<mp_module>(base), procName);
+#endif
 }
 
+#if defined(MINIPY_OS_WINDOWS)
 static bool pydMapImage(const std::vector<unsigned char>& data, std::string& error,
 
-                        PydImageInfo& info){
+                        PydImageInfo& info, const std::string& moduleName){
+    (void)moduleName;
     auto fail = [&](const std::string& message){
         error = message;
         return false;
@@ -11342,6 +12896,62 @@ static bool pydMapImage(const std::vector<unsigned char>& data, std::string& err
     info.size = sizeOfImage;
     return true;
 }
+#else
+// 非 Windows 平台把扩展模块字节写入临时文件后交给 dlopen, 符号由系统链接器解析
+// On non-Windows platforms the module bytes go to a temporary file and are handed to
+// dlopen, leaving symbol resolution to the system loader
+// Windows ᠪᠣᠰᠤ ᠲᠠᠯᠠᠪᠠᠢ ᠳᠤ ᠨᠡᠮᠡᠯᠲᠡ ᠮᠣᠳᠤᠯᠢ ᠶᠢ ᠲᠡᠮᠳᠡᠭ ᠹᠠᠢᠯᠳᠤ ᠪᠢᠴᠢᠭᠡᠳ dlopen ᠢᠶᠠᠷ ᠲᠠᠲᠠᠨ᠎ᠠ
+static bool pydMapImage(const std::vector<unsigned char>& data, std::string& error,
+                        PydImageInfo& info, const std::string& moduleName){
+#if defined(__wasi__)
+    // WASI 不支持动态加载, 直接拒绝扩展模块
+    // WASI has no dynamic loading, reject extension modules
+    // WASI ᠳᠤ ᠨᠡᠮᠡᠯᠲᠡ ᠮᠣᠳᠤᠯᠢ ᠲᠠᠲᠠᠬᠤ ᠦᠭᠡᠢ
+    (void)data;
+    (void)info;
+    (void)moduleName;
+    error = "dynamic loading is not supported on WASI";
+    return false;
+#else
+    if (data.empty()){
+        error = "empty module file";
+        return false;
+    }
+    std::string tempDir = mpTempDirectory();
+    if (tempDir.empty()) tempDir = "/tmp";
+    static unsigned int sequence = 0;
+    std::string fileName = "minipy_ext_" + std::to_string(static_cast<long long>(::getpid())) +
+                           "_" + std::to_string(sequence++) + "_" + moduleName + ".so";
+    std::string tempPath = tempDir;
+    if (!tempPath.empty() && tempPath.back() != '/'){
+        tempPath.push_back('/');
+    }
+    tempPath += fileName;
+    FILE* fp = std::fopen(tempPath.c_str(), "wb");
+    if (!fp){
+        error = "cannot create temporary module file";
+        return false;
+    }
+    size_t written = std::fwrite(data.data(), 1, data.size(), fp);
+    std::fclose(fp);
+    if (written != data.size()){
+        std::remove(tempPath.c_str());
+        error = "cannot write temporary module file";
+        return false;
+    }
+    mp_module handle = mpLoadLibrary(tempPath);
+    std::string loadError = mpLibraryError();
+    std::remove(tempPath.c_str());
+    if (!handle){
+        error = loadError.empty() ? std::string("cannot open shared object") : loadError;
+        return false;
+    }
+    info.base = reinterpret_cast<void*>(handle);
+    info.size = data.size();
+    return true;
+#endif
+}
+#endif
 
 
 // pyd 构建 模块
@@ -11463,7 +13073,7 @@ void vm::loadpyd(const std::string& name, std::vector<unsigned char> pydfile){
     pydEnsureInit();
     std::string error;
     PydImageInfo image;
-    if (!pydMapImage(pydfile, error, image)){
+    if (!pydMapImage(pydfile, error, image, name)){
         raiseError("ImportError", "cannot load pyd '" + name + "': " + error);
         return;
     }

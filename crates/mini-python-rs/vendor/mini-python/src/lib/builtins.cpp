@@ -84,7 +84,7 @@ static minipy::value fnLen(minipy::cffi& args){
     if (value.type == "range" && value.ptr){
         return args.mkint(static_cast<minipy::range_t*>(value.ptr)->count());
     }
-    if (value.type == "bytes"){
+    if (value.type == "bytes" || value.type == "bytearray"){
         return args.mkint(static_cast<long long>(
             static_cast<std::string*>(value.ptr)->size()));
     }
@@ -99,6 +99,21 @@ static minipy::value fnLen(minipy::cffi& args){
     if (container.type == "list" && container.ptr){
         return args.mkint(static_cast<long long>(
             static_cast<std::vector<minipy::value>*>(container.ptr)->size()));
+    }
+    if (value.type == "native_object" && value.ptr){
+        minipy::value result;
+        if (minipy::cffiCallMethod(vm, value, "__len__", {}, result)) return result;
+    }
+    if (value.type == "class" && value.ptr){
+        auto* klass = static_cast<minipy::class_t*>(value.ptr);
+        if (klass->builtinBase.rfind("enum:", 0) == 0 && klass->attributes){
+            auto* attrs = static_cast<std::map<std::string, minipy::value>*>(klass->attributes);
+            auto it = attrs->find("_member_names_");
+            if (it != attrs->end() && it->second.type == "list" && it->second.ptr){
+                return args.mkint(static_cast<long long>(
+                    static_cast<std::vector<minipy::value>*>(it->second.ptr)->size()));
+            }
+        }
     }
     std::string typeName = value.type == "none" ? "NoneType" : value.type;
     vm.raiseError("TypeError", "object of type '" + typeName + "' has no len()");
@@ -152,6 +167,16 @@ static minipy::value fnInt(minipy::cffi& args){
         vm.raiseError("TypeError", "int() can't convert non-string with explicit base");
         return args.none();
     }
+    if (value.type == "native_object" && value.ptr){
+        auto* inst = static_cast<minipy::ffi_instance*>(value.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__int__")){
+            minipy::value result;
+            if (minipy::cffiCallMethod(vm, value, "__int__", {}, result) &&
+                !vm.hasError() && result.type == "int")
+                return result;
+            if (vm.hasError()) return args.none();
+        }
+    }
     if (value.type == "str"){
         std::string text = vm.toString(value);
         size_t begin = 0;
@@ -187,6 +212,16 @@ static minipy::value fnFloat(minipy::cffi& args){
         return args.none();
     }
     minipy::value value = args.arg(0);
+    if (value.type == "native_object" && value.ptr){
+        auto* inst = static_cast<minipy::ffi_instance*>(value.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__float__")){
+            minipy::value result;
+            if (minipy::cffiCallMethod(vm, value, "__float__", {}, result) &&
+                !vm.hasError() && result.type == "float")
+                return result;
+            if (vm.hasError()) return args.none();
+        }
+    }
     if (value.type != "str" && value.type != "int" && value.type != "float" &&
         value.type != "bool"){
         std::string typeName = value.type == "none" ? "NoneType" : value.type;
@@ -233,6 +268,20 @@ static minipy::value fnAbs(minipy::cffi& args){
         return args.none();
     }
     minipy::value value = args.arg(0);
+    if (value.type == "native_object" && value.ptr){
+        auto* inst = static_cast<minipy::ffi_instance*>(value.ptr);
+        if (inst && inst->klass && inst->klass->methods.count("__abs__")){
+            minipy::value result;
+            if (minipy::cffiCallMethod(vm, value, "__abs__", {}, result) &&
+                !vm.hasError())
+                return result;
+            if (vm.hasError()) return args.none();
+        }
+        double re = 0.0, im = 0.0;
+        if (minipy::complexPartsEx(value, re, im)){
+            return args.mkfloat(std::hypot(re, im));
+        }
+    }
     if (value.type != "int" && value.type != "float" && value.type != "bool"){
         std::string typeName = value.type == "none" ? "NoneType" : value.type;
         vm.raiseError("TypeError", "bad operand type for abs(): '" + typeName + "'");
@@ -573,7 +622,10 @@ static minipy::value fnSorted(minipy::cffi& args){
             }
             return xv->size() < yv->size();
         }
-        return vm.toFloat(x) < vm.toFloat(y);
+        bool xNumeric = (x.type == "int" || x.type == "float" || x.type == "bool");
+        bool yNumeric = (y.type == "int" || y.type == "float" || y.type == "bool");
+        if (xNumeric && yNumeric) return vm.toFloat(x) < vm.toFloat(y);
+        return vm.truthy(vm.applyBinary("<", x, y));
     };
     if (reverse){
         std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& a, const auto& b){
@@ -671,6 +723,20 @@ static minipy::value fnNext(minipy::cffi& args){
                     return args.arg(1);
                 }
                 return result;
+            }
+
+            if (inst->klass &&
+                inst->klass->methods.find("__next__") != inst->klass->methods.end()){
+                minipy::value result = args.none();
+                if (minipy::cffiCallMethod(vm, obj, "__next__", {}, result)){
+                    if (vm.hasError() && vm.exceptionType() == "StopIteration" &&
+                        args.argc() == 2){
+                        vm.clearErr();
+                        return args.arg(1);
+                    }
+                    return result;
+                }
+                vm.clearErr();
             }
         }
     }
@@ -1149,7 +1215,14 @@ static minipy::value fnIsSubclass(minipy::cffi& args){
         return false;
     };
     bool subIsBool = isBuiltinTypeName(sub, "bool");
-    if (sub.type != "class" && !subIsBool){
+    std::string subTypeName;
+    if (sub.type == "class" && sub.ptr)
+        subTypeName = static_cast<minipy::class_t*>(sub.ptr)->name;
+    else if (sub.type == "native_object" && sub.ptr){
+        auto* si = static_cast<minipy::ffi_instance*>(sub.ptr);
+        if (!si->klass) subTypeName = si->typeName;
+    }
+    if (subTypeName.empty() && !subIsBool){
         args.vm->raiseError("TypeError", "issubclass() arg 1 must be a class");
         return args.none();
     }
@@ -1163,9 +1236,19 @@ static minipy::value fnIsSubclass(minipy::cffi& args){
             if (tk->name == "int" || tk->name == "object" || tk->name == "bool")
                 return args.mkbool(true);
         }
+        if (cls.type == "native_object" && cls.ptr){
+            auto* tk = static_cast<minipy::ffi_instance*>(cls.ptr);
+            if (tk->klass){
+                std::string abc = tk->klass->name;
+                if (abc == "Number" || abc == "Complex" || abc == "Real" ||
+                    abc == "Rational" || abc == "Integral")
+                    return args.mkbool(true);
+            }
+        }
         return args.mkbool(false);
     }
-    auto* subKlass = static_cast<minipy::class_t*>(sub.ptr);
+    auto* subKlass = (sub.type == "class" && sub.ptr)
+        ? static_cast<minipy::class_t*>(sub.ptr) : nullptr;
     std::vector<minipy::value> clsList;
     if (cls.type == "tuple" && cls.ptr){
         auto* tp = static_cast<std::vector<minipy::value>*>(cls.ptr);
@@ -1185,6 +1268,27 @@ static minipy::value fnIsSubclass(minipy::cffi& args){
         } else if (target.type == "native_object" && target.ptr){
             auto* tk = static_cast<minipy::ffi_instance*>(target.ptr);
             if (tk->klass && tk->klass->name == "object") return args.mkbool(true);
+            if (tk->klass){
+                std::string abc = tk->klass->name;
+                if (abc == "Number" || abc == "Complex" || abc == "Real" ||
+                    abc == "Rational" || abc == "Integral"){
+                    std::string sn = subTypeName.empty() ? std::string("bool") : subTypeName;
+                    bool intLike = (sn == "int" || sn == "bool");
+                    bool floatLike = (sn == "float");
+                    bool complexLike = (sn == "complex");
+                    bool fraction = (sn == "Fraction");
+                    bool result;
+                    if (abc == "Number" || abc == "Complex")
+                        result = intLike || floatLike || complexLike || fraction;
+                    else if (abc == "Real")
+                        result = intLike || floatLike || fraction;
+                    else if (abc == "Rational")
+                        result = intLike || fraction;
+                    else
+                        result = intLike;
+                    return args.mkbool(result);
+                }
+            }
             if (!tk->klass && (tk->typeName == "dict" || tk->typeName == "list")){
                 if (args.vm->isSubclassOfBuiltin(sub, tk->typeName))
                     return args.mkbool(true);
@@ -1514,6 +1618,18 @@ static minipy::value fnDivmod(minipy::cffi& args){
     minipy::vm& vm = *args.vm;
     if (args.argc() < 2) return args.none();
     minipy::value a = args.arg(0), b = args.arg(1);
+    if (a.type == "native_object" && a.ptr){
+        minipy::value qr;
+        if (minipy::cffiCallMethod(vm, a, "__divmod__", {b}, qr) && !vm.hasError())
+            return qr;
+        if (vm.hasError()) return args.none();
+        minipy::value q, r;
+        if (minipy::cffiCallMethod(vm, a, "__floordiv__", {b}, q) && !vm.hasError() &&
+            minipy::cffiCallMethod(vm, a, "__mod__", {b}, r) && !vm.hasError()){
+            return vm.makeTuple({q, r});
+        }
+        if (vm.hasError()) return args.none();
+    }
     if (a.type == "float" || b.type == "float"){
         double x = vm.toFloat(a), y = vm.toFloat(b);
         if (y == 0.0){ vm.raiseError("ZeroDivisionError", "float division by zero"); return args.none(); }
@@ -1704,7 +1820,9 @@ static minipy::value fnFileRead(minipy::cffi& args){
         st->stream.read(&out[0], static_cast<std::streamsize>(n));
         out.resize(static_cast<size_t>(st->stream.gcount() > 0 ? st->stream.gcount() : 0));
     }
-    return args.mkstr(out);
+    value result = args.mkstr(out);
+    if (st->binary) result.type = "bytes";
+    return result;
 }
 
 // fn 文件 readline()
@@ -1716,7 +1834,9 @@ static minipy::value fnFileReadline(minipy::cffi& args){
     std::string line;
     if (!std::getline(st->stream, line)) return args.mkstr("");
     if (!st->stream.eof()) line += '\n';
-    return args.mkstr(line);
+    value result = args.mkstr(line);
+    if (st->binary) result.type = "bytes";
+    return result;
 }
 
 // fn 文件 readlines()
@@ -1729,7 +1849,9 @@ static minipy::value fnFileReadlines(minipy::cffi& args){
     std::string line;
     while (std::getline(st->stream, line)){
         if (!st->stream.eof()) line += '\n';
-        lines.push_back(args.mkstr(line));
+        value item = args.mkstr(line);
+        if (st->binary) item.type = "bytes";
+        lines.push_back(item);
         line.clear();
     }
     return args.mklist(lines);
@@ -1887,7 +2009,7 @@ static minipy::value mkBytesValue(minipy::vm& vm, const std::string& raw){
 
 static std::string bytesSourceOf(minipy::vm& vm, const minipy::value& v, bool& ok){
     ok = true;
-    if (v.type == "bytes") return *static_cast<std::string*>(v.ptr);
+    if (v.type == "bytes" || v.type == "bytearray") return *static_cast<std::string*>(v.ptr);
     if (v.type == "str") return vm.toString(v);
     if (v.type == "list" || v.type == "tuple"){
         std::string raw;
@@ -1924,7 +2046,10 @@ static minipy::value fnBytes(minipy::cffi& args){
 }
 
 static minipy::value fnBytearray(minipy::cffi& args){
-    return fnBytes(args);
+    minipy::value result = fnBytes(args);
+    if (args.vm->hasError()) return result;
+    result.type = "bytearray";
+    return result;
 }
 
 static minipy::value fnMemoryviewConstructor(minipy::cffi& args){
@@ -2040,13 +2165,13 @@ static minipy::value fnSliceConstructor(minipy::cffi& args){
 
 static minipy::value fnComplexConstructor(minipy::cffi& args){
     minipy::vm& vm = *args.vm;
-    minipy::value obj = args.mkobject(nullptr);
     double real = args.argc() >= 1 ? args.arg_float(0) : 0.0;
     double imag = args.argc() >= 2 ? args.arg_float(1) : 0.0;
-    args.setattr(obj, "real", args.mkfloat(real));
-    args.setattr(obj, "imag", args.mkfloat(imag));
-    (void)vm;
-    return obj;
+
+// 与复数字面量走同一构造路径, 保证行为一致
+// share the same construction path as complex literals for consistent behavior
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ literal ᠲᠠᠢ ᠠᠳᠠᠯᠢ ᠵᠠᠮ ᠢᠶᠠᠷ ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+    return vm.makeComplex(real, imag);
 }
 
 static minipy::value fnCompile(minipy::cffi& args){

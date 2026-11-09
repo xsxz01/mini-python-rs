@@ -47,7 +47,7 @@ mini-python-rs/
 
 ```toml
 [dependencies]
-mini-python-rs = "0.1.0"
+mini-python-rs = "0.1.3"
 ```
 
 然后创建 VM、执行源码：

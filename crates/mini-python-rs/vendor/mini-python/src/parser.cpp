@@ -764,6 +764,25 @@ struct Parser{
                   std::vector<execute_t>* body){
         pos++;
         std::string name = expectWord();
+
+// Python 3.12+ 泛型类型参数 def f[T](...), 注解整体被忽略, 直接跳过 [...]
+// PEP 695 type parameters def f[T](...): annotations are ignored, skip [...]
+// PEP 695 ᠶᠢᠨ ᠲᠠᠶᠢᠯᠪᠤᠷᠢ ᠶᠢ ᠠᠯᠭᠤᠰᠬᠢᠨ᠎ᠠ
+        if (isSymbol("[")){
+            int typeParamDepth = 0;
+            while (!atEnd()){
+                if (cur().type == tokenType_symbol){
+                    if (cur().value == "[") typeParamDepth++;
+                    else if (cur().value == "]"){
+                        typeParamDepth--;
+                        pos++;
+                        if (typeParamDepth == 0) break;
+                        continue;
+                    }
+                }
+                pos++;
+            }
+        }
         expectSymbol("(");
         defDepth++;
         std::vector<std::string> args;
@@ -1516,118 +1535,125 @@ struct Parser{
     void parseWith(std::vector<execute_t>& body, ParseContext& ctx, class_t* cls){
         pos++;
 
+// 单个上下文项的解析状态, with a, b: 按嵌套 with 展开
+// state of one context item; with a, b: expands like nested with blocks
+// ᠨᠢᠭᠡ context item ᠦᠨ ᠪᠠᠶᠢᠳᠠᠯ
+        struct WithItem{
+            std::string ctxTemp;
+            std::string asVar;
+            span_t span;
+            size_t tryIndex = 0;
+        };
+        std::vector<WithItem> items;
 
+        while (true){
+            WithItem item;
 
+            ExprResult exprResult = parseExpression(body, ctx);
+            item.span = exprResult.span;
 
-        int withId = newCallId();
-        std::string ctxTemp = "@wctx" + std::to_string(withId);
-        std::string asVar;
+            int withId = newCallId();
+            item.ctxTemp = "@wctx" + std::to_string(withId);
 
+            execute_t assignCtx;
+            assignCtx.operation = eop_assign;
+            assignCtx.operands = {item.ctxTemp, "", exprResult.text};
+            assignCtx.span = exprResult.span;
+            emit(body, assignCtx);
 
-        ExprResult exprResult = parseExpression(body, ctx);
-
-
-        execute_t assignCtx;
-        assignCtx.operation = eop_assign;
-        assignCtx.operands = {ctxTemp, "", exprResult.text};
-        assignCtx.span = exprResult.span;
-        emit(body, assignCtx);
-
-
-        if (matchWord("as")){
-            if (cur().type == tokenType_value){
-                asVar = cur().value;
-                pos++;
+            if (matchWord("as")){
+                if (cur().type == tokenType_value){
+                    item.asVar = cur().value;
+                    pos++;
+                }
             }
+
+            execute_t enterCall;
+            enterCall.operation = eop_call;
+            enterCall.callId = newCallId();
+            enterCall.operands.push_back(item.ctxTemp + ".__enter__");
+
+            enterCall.span = item.span;
+            enterCall.operandSpans.push_back(item.span);
+            emit(body, enterCall);
+
+            if (!item.asVar.empty()){
+                execute_t assignVar;
+                assignVar.operation = eop_assign;
+                assignVar.operands = {item.asVar, "", "@fret" + std::to_string(enterCall.callId)};
+                assignVar.span = item.span;
+                assignVar.operandSpans.push_back(span_t{});
+                assignVar.operandSpans.push_back(span_t{});
+                assignVar.operandSpans.push_back(item.span);
+                emit(body, assignVar);
+            }
+
+            item.tryIndex = body.size();
+            execute_t tryIns;
+            tryIns.operation = eop_try;
+            tryIns.operands = {"0", "0", "0"};
+            emit(body, tryIns);
+
+            items.push_back(item);
+
+            if (!matchSymbol(",")) break;
         }
 
         expectSymbol(":");
 
-
-        execute_t enterCall;
-        enterCall.operation = eop_call;
-        enterCall.callId = newCallId();
-        enterCall.operands.push_back(ctxTemp + ".__enter__");
-
-        enterCall.span = exprResult.span;
-        enterCall.operandSpans.push_back(exprResult.span);
-        emit(body, enterCall);
-
-        if (!asVar.empty()){
-            execute_t assignVar;
-            assignVar.operation = eop_assign;
-            assignVar.operands = {asVar, "", "@fret" + std::to_string(enterCall.callId)};
-            assignVar.span = exprResult.span;
-            assignVar.operandSpans.push_back(span_t{});
-            assignVar.operandSpans.push_back(span_t{});
-            assignVar.operandSpans.push_back(exprResult.span);
-            emit(body, assignVar);
-        }
-
-
-        size_t tryIndex = body.size();
-        execute_t tryIns;
-        tryIns.operation = eop_try;
-        tryIns.operands = {"0", "0", "0"};
-        emit(body, tryIns);
-
         parseSuite(body, ctx, cls);
 
+// 按相反顺序收尾, 后进入的先退出, 与嵌套 with 行为一致
+// finish in reverse order: the later entered exits first, like nested with
+// ᠰᠢᠭᠦᠳᠡᠷᠢ ᠳᠠᠷᠠᠭ᠎ᠠ ᠪᠡᠷ ᠲᠡᠭᠦᠰᠭᠡᠨ᠎ᠡ
+        for (auto it = items.rbegin(); it != items.rend(); ++it){
+            size_t bodyEnd = body.size();
+            execute_t skip;
+            skip.operation = eop_jmp;
+            skip.operands = {"0"};
+            emit(body, skip);
 
-        size_t bodyEnd = body.size();
-        execute_t skip;
-        skip.operation = eop_jmp;
-        skip.operands = {"0"};
-        emit(body, skip);
+            size_t finallyIdx = body.size();
+            execute_t finIns;
+            finIns.operation = eop_finally;
+            finIns.operands = {"0"};
+            emit(body, finIns);
 
+            execute_t exitCall;
+            exitCall.operation = eop_call;
+            exitCall.callId = newCallId();
+            int exitCallId = exitCall.callId;
+            exitCall.operands.push_back(it->ctxTemp + ".__exit__");
+            exitCall.operands.push_back("$exc_type");
+            exitCall.operands.push_back("$exc_value");
+            exitCall.operands.push_back("$exc_tb");
+            exitCall.span = it->span;
+            exitCall.operandSpans.push_back(it->span);
+            emit(body, exitCall);
 
-        size_t finallyIdx = body.size();
-        execute_t finIns;
-        finIns.operation = eop_finally;
-        finIns.operands = {"0"};
-        emit(body, finIns);
+            execute_t suppressIns;
+            suppressIns.operation = eop_suppress_if_truthy;
+            suppressIns.operands = {"@fret" + std::to_string(exitCallId)};
+            suppressIns.span = it->span;
+            emit(body, suppressIns);
 
-        execute_t exitCall;
-        exitCall.operation = eop_call;
-        exitCall.callId = newCallId();
-        int exitCallId = exitCall.callId;
-        exitCall.operands.push_back(ctxTemp + ".__exit__");
-        exitCall.operands.push_back("$exc_type");
-        exitCall.operands.push_back("$exc_value");
-        exitCall.operands.push_back("$exc_tb");
-        exitCall.span = exprResult.span;
-        exitCall.operandSpans.push_back(exprResult.span);
-        emit(body, exitCall);
+            size_t finallyEnd = body.size();
+            execute_t finJmp;
+            finJmp.operation = eop_jmp;
+            finJmp.operands = {"0"};
+            emit(body, finJmp);
 
+            size_t endIndex = body.size();
 
+            body[it->tryIndex].operands[1] = std::to_string(finallyIdx);
+            body[it->tryIndex].operands[2] = std::to_string(endIndex);
 
-        execute_t suppressIns;
-        suppressIns.operation = eop_suppress_if_truthy;
-        suppressIns.operands = {"@fret" + std::to_string(exitCallId)};
-        suppressIns.span = exprResult.span;
-        emit(body, suppressIns);
+            body[bodyEnd].operands[0] = std::to_string(finallyIdx);
 
-        size_t finallyEnd = body.size();
-        execute_t finJmp;
-        finJmp.operation = eop_jmp;
-        finJmp.operands = {"0"};
-        emit(body, finJmp);
+            body[finallyEnd].operands[0] = std::to_string(endIndex);
 
-        size_t endIndex = body.size();
-
-
-
-        body[tryIndex].operands[1] = std::to_string(finallyIdx);
-        body[tryIndex].operands[2] = std::to_string(endIndex);
-
-
-        body[bodyEnd].operands[0] = std::to_string(finallyIdx);
-
-
-        body[finallyEnd].operands[0] = std::to_string(endIndex);
-
-
-        body[finallyIdx].operands[0] = std::to_string(endIndex);
+            body[finallyIdx].operands[0] = std::to_string(endIndex);
+        }
 
         eatNewline();
     }
@@ -1677,6 +1703,12 @@ struct Parser{
                 if (cur().type == tokenType_value){
                     typeText = cur().value;
                     pos++;
+                    while (isSymbol(".") && pos + 1 < tokens.size() &&
+                           tokens[pos + 1].type == tokenType_value){
+                        pos++;
+                        typeText += "." + cur().value;
+                        pos++;
+                    }
                 } else {
                     ExprResult e = parseExpression(body, ctx);
                     typeText = e.text;
@@ -1979,6 +2011,7 @@ struct Parser{
                 while (isSymbol(".")){
                     pos++;
                     if (cur().type == tokenType_value){
+                        moduleName += "." + cur().value;
                         pos++;
                     }
                 }
@@ -2013,7 +2046,10 @@ struct Parser{
             pos++;
             while (isSymbol(".")){
                 pos++;
-                if (cur().type == tokenType_value) pos++;
+                if (cur().type == tokenType_value){
+                    moduleName += "." + cur().value;
+                    pos++;
+                }
             }
         }
 
@@ -2359,6 +2395,31 @@ struct Parser{
                 if (after.type == tokenType_symbol && isAugmentedOp(after.value)){
                     pos = end + 1;
                     parseAugmentedAssignment(body, ctx, cls, target, after.value);
+                    eatNewline();
+                    return;
+                }
+
+// 带类型注解的赋值 (x: int = 1), 注解部分直接跳过, 按普通赋值处理
+// annotated assignment (x: int = 1): skip the annotation, assign as usual
+// ᠲᠠᠶᠢᠯᠪᠤᠷᠢ ᠲᠠᠢ ᠣᠩᠭᠣᠳᠠᠬᠤ (x: int = 1)
+                if (after.type == tokenType_symbol && after.value == ":" &&
+                    target != "lambda"){
+                    pos = end + 1;
+                    int annDepth = 0;
+                    while (!atEnd() && cur().type != tokenType_newline &&
+                           cur().type != tokenType_dedent){
+                        if (cur().type == tokenType_symbol){
+                            const std::string& sv = cur().value;
+                            if (sv == "(" || sv == "[" || sv == "{") annDepth++;
+                            else if (sv == ")" || sv == "]" || sv == "}") annDepth--;
+                            else if (sv == "=" && annDepth == 0) break;
+                        }
+                        pos++;
+                    }
+                    if (!atEnd() && cur().type == tokenType_symbol && cur().value == "="){
+                        pos++;
+                        parseAssignment(body, ctx, cls, target);
+                    }
                     eatNewline();
                     return;
                 }
@@ -3055,7 +3116,29 @@ struct Parser{
                 std::vector<std::pair<std::string, std::string>> kwargs;
                 std::vector<std::string> argsUnpack;
                 std::vector<std::string> kwargsUnpack;
+                bool genexpClosed = false;
                 if (!isSymbol(")")){
+
+// 试探首个实参: 后面紧跟 for 时整体按生成器表达式处理 f(x for x in y)
+// probe the first argument: a trailing for means f(x for x in y)
+// ᠡᠬᠦᠨ ᠦ argument ᠢ ᠰᠢᠯᠭᠠᠨ᠎ᠠ
+                    size_t argSave = pos;
+                    size_t argMark = body.size();
+                    ExprResult probeArg = parseExpression(body, ctx);
+                    (void)probeArg;
+                    if (isWord("for")){
+                        pos = argSave;
+                        body.resize(argMark);
+                        ExprResult ge = parseComprehension(body, ctx, openTok, "gen");
+                        args.push_back(ge.text);
+                        argSpans.push_back(ge.span);
+                        genexpClosed = true;
+                    } else {
+                        pos = argSave;
+                        body.resize(argMark);
+                    }
+                }
+                if (!genexpClosed && !isSymbol(")")){
                     while (!atEnd()){
                         if (isSymbol("**")){
                             pos++;
@@ -3081,8 +3164,8 @@ struct Parser{
                         if (isSymbol(")")) break;
                     }
                 }
-                token closeTok = cur();
-                expectSymbol(")");
+                token closeTok = genexpClosed ? tokens[pos - 1] : cur();
+                if (!genexpClosed) expectSymbol(")");
                 span_t callSpan = atomSpan;
                 if (closeTok.endCol > 0 && callSpan.valid() && closeTok.line == callSpan.line){
                     callSpan.endCol = closeTok.endCol;
@@ -3164,6 +3247,7 @@ struct Parser{
 
 
         if (compType == "list") expectSymbol("]");
+        else if (compType == "gen") expectSymbol(")");
         else expectSymbol("}");
 
 
@@ -3319,6 +3403,16 @@ struct Parser{
         callFnIns.line = openTok.line;
         emit(body, callFnIns);
 
+// 生成器表达式不加 list/set/dict 包装, 直接得到生成器对象
+// generator expressions are not wrapped; the generator object is the result
+// generator ᠢᠯᠡᠳᠬᠡᠯ ᠢ ᠬᠤᠪᠢᠯᠭᠠᠰᠢ ᠦᠭᠡᠢ ᠪᠡᠷ ᠰᠢᠭᠦᠳᠡᠷᠢ ᠠᠪᠬᠤ
+        if (compType == "gen"){
+            ExprResult result;
+            result.text = "@fret" + std::to_string(callFnIns.callId);
+            result.type = "generator";
+            result.span = tokenSpan(openTok);
+            return result;
+        }
 
         std::string wrapper = (compType == "dict") ? "dict" :
                               (compType == "set")  ? "set"  : "list";
@@ -3453,16 +3547,18 @@ struct Parser{
 
         if (cur().type == tokenType_string){
             token tk = cur();
+            bool isBytes = tk.bytes;
             std::string joined = tk.value;
             pos++;
 
             while (cur().type == tokenType_string){
+                isBytes = isBytes || cur().bytes;
                 joined += cur().value;
                 pos++;
             }
-            std::string ref = stringRef(joined);
+            std::string ref = (isBytes ? "b" : "") + stringRef(joined);
             span_t span = tokenSpan(tk);
-            return parsePostfix(body, ctx, ref, "str", span);
+            return parsePostfix(body, ctx, ref, isBytes ? "bytes" : "str", span);
         }
 
         if (cur().type == tokenType_fstring){
@@ -3514,7 +3610,20 @@ struct Parser{
                 return parsePostfix(body, ctx, "()", "tuple", span);
             }
 
+            size_t savePos = pos;
+            size_t probeStart = body.size();
             ExprResult first = parseExpression(body, ctx);
+
+// 圆括号内出现 for 即为生成器表达式 (x for x in items)
+// 'for' inside parentheses means a generator expression (x for x in items)
+// ᠬᠠᠯᠲᠤ ᠳᠣᠲᠣᠷ᠎ᠠ for ᠪᠠᠶᠢᠪᠠᠯ generator ᠢᠯᠡᠳᠬᠡᠯ ᠮᠥᠨ
+            if (isWord("for")){
+                pos = savePos;
+                body.resize(probeStart);
+                ExprResult compResult = parseComprehension(body, ctx, openTok, "gen");
+                return compResult;
+            }
+
             std::vector<std::string> elements;
             elements.push_back(first.text);
             bool isTuple = false;

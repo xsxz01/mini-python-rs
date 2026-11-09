@@ -10,6 +10,10 @@ repository = "https://github.com/xsxz01/mini-python-rs"
 build = "build.rs"
 include = ["Cargo.toml", "build.rs", "src/**", "vendor/**", "README.md", "README.en.md", "LICENSE"]
 
+[features]
+default = ["cross-platform"]
+cross-platform = []
+
 [lib]
 name = "mini_python_rs"
 

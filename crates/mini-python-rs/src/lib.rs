@@ -1,52 +1,16 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_int, c_void};
 use std::fmt;
 use std::ptr::NonNull;
 
-const MP_OK: c_int = 0;
+pub mod ffi;
+use ffi::*;
 
-unsafe extern "C" {
-    fn mp_vm_new() -> *mut c_void;
-    fn mp_vm_free(vm: *mut c_void);
-    fn mp_vm_use_stdlib(vm: *mut c_void) -> c_int;
-    fn mp_vm_exec_source(vm: *mut c_void, source: *const c_char) -> c_int;
-    fn mp_vm_exec_main(vm: *mut c_void, source: *const c_char) -> c_int;
-    fn mp_vm_load_source(vm: *mut c_void, source: *const c_char) -> c_int;
-    fn mp_vm_run(vm: *mut c_void) -> c_int;
-    fn mp_vm_exception_type(vm: *mut c_void) -> *const c_char;
-    fn mp_vm_clear_error(vm: *mut c_void);
-    fn mp_vm_last_error(vm: *mut c_void) -> *const c_char;
-    fn mp_vm_get_global(vm: *mut c_void, name: *const c_char) -> *mut c_void;
-    fn mp_vm_set_global(vm: *mut c_void, name: *const c_char, value: *mut c_void) -> c_int;
-    fn mp_vm_add_module(vm: *mut c_void, name: *const c_char, source: *const c_char) -> c_int;
-    fn mp_str_n(vm: *mut c_void, utf8: *const c_char, len: usize) -> *mut c_void;
-    fn mp_value_as_str_n(value: *mut c_void, out_len: *mut usize) -> *const c_char;
-    fn mp_value_release(value: *mut c_void);
-    fn mp_value_kind(value: *mut c_void) -> c_int;
-    fn mp_value_type_name(value: *mut c_void) -> *const c_char;
-    fn mp_value_as_int(value: *mut c_void) -> i64;
-    fn mp_value_as_float(value: *mut c_void) -> f64;
-    fn mp_value_as_bool(value: *mut c_void) -> c_int;
-    fn mp_none(vm: *mut c_void) -> *mut c_void;
-    fn mp_int(vm: *mut c_void, value: i64) -> *mut c_void;
-    fn mp_float(vm: *mut c_void, value: f64) -> *mut c_void;
-    fn mp_bool(vm: *mut c_void, value: c_int) -> *mut c_void;
-    fn mp_lib_new(name: *const c_char) -> *mut c_void;
-    fn mp_lib_free(lib: *mut c_void);
-    fn mp_lib_add_function(
-        lib: *mut c_void,
-        name: *const c_char,
-        callback: *mut c_void,
-        user: *mut c_void,
-    ) -> c_int;
-    fn mp_vm_load_lib(vm: *mut c_void, lib: *mut c_void) -> c_int;
-    fn mp_ctx_argc(ctx: *mut c_void) -> usize;
-    fn mp_ctx_arg(ctx: *mut c_void, index: usize) -> *mut c_void;
-    fn mp_ctx_error(ctx: *mut c_void, kind: *const c_char, message: *const c_char);
-}
+#[cfg(feature = "cross-platform")]
+pub mod platform;
 
-/// Rust 原生回调接口支持的 Python 标量值。
+/// Rust 原生回调接口可读写的 MiniPython 值子集。
 ///
-/// 目前只允许这五种类型跨越原生回调边界；列表、字典及任意 Python 对象尚未封装。
+/// 列表、字典及任意脚本对象仍应通过 [`ffi`] 原始 C API 处理。
 ///
 /// # 示例
 /// ```
@@ -67,6 +31,10 @@ pub enum NativeValue {
     Boolean(bool),
     /// Python UTF-8 字符串。
     String(String),
+    /// Python `complex`，以实部和虚部表示。
+    Complex { real: f64, imaginary: f64 },
+    /// Python `bytes` / `bytearray`，保留任意字节。
+    Bytes(Vec<u8>),
 }
 
 type NativeFunction = Box<dyn Fn(&[NativeValue]) -> Result<NativeValue, String>>;
@@ -177,8 +145,8 @@ unsafe extern "C" fn native_trampoline(
 
 unsafe fn native_value_from_handle(handle: *mut c_void) -> Result<NativeValue, String> {
     match unsafe { mp_value_kind(handle) } {
-        0 => Ok(NativeValue::None),
-        1 => {
+        ffi::MP_KIND_NONE => Ok(NativeValue::None),
+        ffi::MP_KIND_INT => {
             let kind = unsafe { mp_value_type_name(handle) };
             if !kind.is_null() && unsafe { CStr::from_ptr(kind) }.to_bytes() == b"bool" {
                 Ok(NativeValue::Boolean(
@@ -188,8 +156,8 @@ unsafe fn native_value_from_handle(handle: *mut c_void) -> Result<NativeValue, S
                 Ok(NativeValue::Integer(unsafe { mp_value_as_int(handle) }))
             }
         }
-        2 => Ok(NativeValue::Float(unsafe { mp_value_as_float(handle) })),
-        3 => {
+        ffi::MP_KIND_FLOAT => Ok(NativeValue::Float(unsafe { mp_value_as_float(handle) })),
+        ffi::MP_KIND_STR => {
             let mut len = 0;
             let text = unsafe { mp_value_as_str_n(handle, &mut len) };
             if text.is_null() {
@@ -198,6 +166,24 @@ unsafe fn native_value_from_handle(handle: *mut c_void) -> Result<NativeValue, S
             let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), len) };
             Ok(NativeValue::String(
                 String::from_utf8_lossy(bytes).into_owned(),
+            ))
+        }
+        ffi::MP_KIND_COMPLEX => {
+            let mut real = 0.0;
+            let mut imaginary = 0.0;
+            if unsafe { mp_value_as_complex(handle, &mut real, &mut imaginary) } == 0 {
+                return Err("failed to read complex argument".to_owned());
+            }
+            Ok(NativeValue::Complex { real, imaginary })
+        }
+        ffi::MP_KIND_BYTES => {
+            let mut len = 0;
+            let bytes = unsafe { mp_value_as_bytes(handle, &mut len) };
+            if bytes.is_null() {
+                return Err("failed to read bytes argument".to_owned());
+            }
+            Ok(NativeValue::Bytes(
+                unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), len) }.to_vec(),
             ))
         }
         kind => Err(format!("unsupported MiniPython argument kind {kind}")),
@@ -211,7 +197,41 @@ unsafe fn native_value_to_handle(vm: *mut c_void, value: NativeValue) -> *mut c_
         NativeValue::Float(value) => unsafe { mp_float(vm, value) },
         NativeValue::Boolean(value) => unsafe { mp_bool(vm, i32::from(value)) },
         NativeValue::String(value) => unsafe { mp_str_n(vm, value.as_ptr().cast(), value.len()) },
+        NativeValue::Complex { real, imaginary } => unsafe { mp_complex(vm, real, imaginary) },
+        NativeValue::Bytes(bytes) => unsafe { bytes_to_handle(vm, &bytes) },
     }
+}
+
+unsafe fn bytes_to_handle(vm: *mut c_void, bytes: &[u8]) -> *mut c_void {
+    let list = unsafe { mp_list(vm) };
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    for &byte in bytes {
+        let item = unsafe { mp_int(vm, i64::from(byte)) };
+        if item.is_null() {
+            unsafe { mp_value_release(list) };
+            return std::ptr::null_mut();
+        }
+        let status = unsafe { mp_seq_append(list, item) };
+        unsafe { mp_value_release(item) };
+        if status != MP_OK {
+            unsafe { mp_value_release(list) };
+            return std::ptr::null_mut();
+        }
+    }
+    let bytes_type = unsafe { mp_builtin_type(vm, c"bytes".as_ptr()) };
+    if bytes_type.is_null() {
+        unsafe { mp_value_release(list) };
+        return std::ptr::null_mut();
+    }
+    let mut args = [list];
+    let result = unsafe { mp_call(vm, bytes_type, args.as_mut_ptr(), args.len()) };
+    unsafe {
+        mp_value_release(bytes_type);
+        mp_value_release(list);
+    }
+    result
 }
 
 fn set_callback_error(ctx: *mut c_void, message: &str) {
@@ -261,6 +281,16 @@ impl Interpreter {
             return Err(interpreter.last_error());
         }
         Ok(interpreter)
+    }
+
+    /// Returns the opaque VM pointer for direct use with [`ffi`] functions.
+    ///
+    /// The pointer is borrowed: it remains valid only until this interpreter is dropped.
+    /// Do not pass it to `mp_vm_free`, retain it beyond the interpreter, or access it
+    /// concurrently from another thread. Calls through [`ffi`] remain unsafe and must
+    /// uphold the upstream C API's ownership rules.
+    pub fn as_raw(&self) -> *mut c_void {
+        self.vm.as_ptr()
     }
 
     /// 编译并执行 Python 源码，顶层变量写入此解释器的全局作用域。
@@ -632,6 +662,25 @@ mod tests {
         interpreter.clear_error();
         assert_eq!(interpreter.exception_type(), None);
     }
+    #[test]
+    fn builtin_type_objects_are_scoped_to_their_vm() {
+        let _guard = test_lock();
+        let mut first = Interpreter::new().expect("first interpreter");
+        first
+            .exec_main("answer = str(41)")
+            .expect("execute in first VM");
+
+        let mut second = Interpreter::new().expect("second interpreter");
+        second
+            .exec_main("answer = str(42)")
+            .expect("execute in second VM");
+        drop(first);
+
+        second
+            .exec_main("answer = str(43)")
+            .expect("execute after the first VM is dropped");
+        assert_eq!(second.get_global_string("answer").as_deref(), Some("43"));
+    }
 
     #[test]
     fn propagates_native_callback_errors_into_minipython() {
@@ -648,6 +697,69 @@ mod tests {
         assert!(
             error.contains("native test failure"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn uses_platform_aware_os_path_apis() {
+        let _guard = test_lock();
+        let mut interpreter = Interpreter::new().expect("interpreter");
+        interpreter
+            .exec("import os\nassert os.path.isabs(os.getcwd())")
+            .expect("platform current directory is an absolute path");
+    }
+
+    #[test]
+    fn round_trips_complex_and_bytes_through_rust_callbacks() {
+        let _guard = test_lock();
+        use super::{NativeModule, NativeValue};
+
+        let mut interpreter = Interpreter::new().expect("interpreter");
+        let module = NativeModule::new("native_values").function("identity", |args| match args {
+            [value @ NativeValue::Complex { .. }] | [value @ NativeValue::Bytes(_)] => {
+                Ok(value.clone())
+            }
+            _ => Err("expected complex or bytes".to_owned()),
+        });
+        interpreter
+            .load_native_module(module)
+            .expect("load Rust module");
+        interpreter
+            .exec(
+                "from native_values import identity\nassert identity(1 + 2j) == 1 + 2j\nassert identity(bytes([0, 65, 255])) == bytes([0, 65, 255])",
+            )
+            .expect("round-trip new upstream scalar types");
+    }
+    #[test]
+    fn raw_c_api_constructs_and_reads_complex_values() {
+        let _guard = test_lock();
+        use super::ffi;
+
+        let interpreter = Interpreter::new().expect("interpreter");
+        let value = unsafe { ffi::mp_complex(interpreter.as_raw(), 3.5, -2.25) };
+        assert!(!value.is_null());
+        assert_eq!(unsafe { ffi::mp_value_kind(value) }, ffi::MP_KIND_COMPLEX);
+        assert_eq!(unsafe { ffi::mp_value_is_complex(value) }, 1);
+
+        let mut real = 0.0;
+        let mut imaginary = 0.0;
+        assert_eq!(
+            unsafe { ffi::mp_value_as_complex(value, &mut real, &mut imaginary) },
+            1
+        );
+        assert_eq!((real, imaginary), (3.5, -2.25));
+        unsafe { ffi::mp_value_release(value) };
+    }
+
+    #[cfg(feature = "cross-platform")]
+    #[test]
+    fn cross_platform_feature_exposes_target_metadata() {
+        let _guard = test_lock();
+        use super::platform::Target;
+
+        assert_eq!(
+            Target::current().is_webassembly(),
+            cfg!(target_arch = "wasm32")
         );
     }
 }

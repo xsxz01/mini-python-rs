@@ -1,0 +1,207 @@
+# inventory	python=3.14.10	eligible=194	excluded=11	cases=144
+rule	section	eligible	reason	alternatives	cases
+file	STARTING RULES	E		1	*
+interactive	STARTING RULES	X	交互式入口，仅 REPL 逐条语句可用，模块源码不可达	1	
+eval	STARTING RULES	X	eval() 表达式入口，模块源码不可达	1	
+func_type	STARTING RULES	X	ast.parse(mode='func_type') 专用入口，模块源码不可达	1	
+statements	GENERAL STATEMENTS	E		1	*
+statement	GENERAL STATEMENTS	E		2	*
+single_compound_stmt	GENERAL STATEMENTS	X	仅被 interactive 入口引用，模块源码不可达	1	
+statement_newline	GENERAL STATEMENTS	X	仅被 interactive 入口引用，模块源码不可达	4	
+simple_stmts	GENERAL STATEMENTS	E		2	*
+simple_stmt	GENERAL STATEMENTS	E		14	*
+compound_stmt	GENERAL STATEMENTS	E		8	module/compound-block
+assignment	SIMPLE STATEMENTS	E		4	module/semicolons,assign/chain,assign/attributes,assign/tuple-target,assign/star,assign/list-target,assign/nested-unpack,assign/annotated-name,assign/annotated-target,assign/annotated-paren,assign/annotated-yield,assign/augassign,assign/augassign-matmul,expr/target-attribute,expr/target-tuple-of-attributes
+annotated_rhs	SIMPLE STATEMENTS	E		2	assign/annotated-name,assign/annotated-yield
+augassign	SIMPLE STATEMENTS	E		13	assign/augassign,assign/augassign-matmul,class/methods
+return_stmt	SIMPLE STATEMENTS	E		1	stmt/return,function/def
+raise_stmt	SIMPLE STATEMENTS	E		2	stmt/raise-from,stmt/raise-bare
+pass_stmt	SIMPLE STATEMENTS	E		1	stmt/pass
+break_stmt	SIMPLE STATEMENTS	E		1	stmt/break
+continue_stmt	SIMPLE STATEMENTS	E		1	stmt/continue
+global_stmt	SIMPLE STATEMENTS	E		1	stmt/global
+nonlocal_stmt	SIMPLE STATEMENTS	E		1	stmt/nonlocal
+del_stmt	SIMPLE STATEMENTS	E		1	stmt/del
+yield_stmt	SIMPLE STATEMENTS	E		1	stmt/yield
+assert_stmt	SIMPLE STATEMENTS	E		1	stmt/assert
+import_stmt	SIMPLE STATEMENTS	E		2	import/name,import/from
+import_name	Import statements	E		1	import/name
+import_from	Import statements	E		2	import/from,import/from-parens,import/from-star,import/from-relative,import/from-dots
+import_from_targets	Import statements	E		3	import/from,import/from-parens,import/from-star
+import_from_as_names	Import statements	E		1	import/from,import/from-parens
+import_from_as_name	Import statements	E		1	import/from,import/from-parens
+dotted_as_names	Import statements	E		1	import/name
+dotted_as_name	Import statements	E		1	import/name
+dotted_name	Import statements	E		2	import/name,import/from
+block	Common elements	E		2	module/compound-block,module/nested-simple,stmt/docstring-class,compound/if,compound/if-oneline,compound/while-else,compound/for-else,compound/with-single,compound/try-finally,compound/try-except-else,function/def,class/def,class/keywords
+decorators	Common elements	E		1	function/decorators
+class_def	Class definitions	E		2	module/compound-block,function/decorators,class/def
+class_def_raw	Class definitions	E		1	module/compound-block,type/class-params,class/def,class/keywords,class/methods
+function_def	Function definitions	E		2	module/nested-simple,function/def,function/decorators
+function_def_raw	Function definitions	E		2	module/nested-simple,function/def,function/return-annotation,function/type-comment,function/async,class/methods
+params	Function parameters	E		1	function/def,function/params-basic
+parameters	Function parameters	E		5	function/def,function/params-basic,function/params-slash
+slash_no_default	Function parameters	E		2	function/params-slash
+slash_with_default	Function parameters	E		2	function/params-slash
+star_etc	Function parameters	E		4	function/params-basic,function/params-star-annotation,function/params-bare-star
+kwds	Function parameters	E		1	function/params-basic
+param_no_default	Function parameters	E		2	function/params-basic,function/params-slash
+param_no_default_star_annotation	Function parameters	E		2	function/params-star-annotation
+param_with_default	Function parameters	E		2	function/params-basic,function/params-slash
+param_maybe_default	Function parameters	E		2	function/params-basic,function/params-bare-star
+param	Function parameters	E		1	function/params-basic
+param_star_annotation	Function parameters	E		1	function/params-star-annotation
+annotation	Function parameters	E		1	assign/annotated-name,assign/annotated-target,assign/annotated-paren,function/return-annotation
+star_annotation	Function parameters	E		1	function/params-star-annotation
+default	Function parameters	E		2	function/params-basic,expr/ellipsis-default
+if_stmt	If statement	E		2	compound/if,compound/if-oneline
+elif_stmt	If statement	E		2	compound/if
+else_block	If statement	E		1	compound/if,compound/while-else,compound/for-else,compound/try-except-else
+while_stmt	While statement	E		1	compound/while-else
+for_stmt	For statement	E		2	compound/for-else,compound/for-type-comment,compound/async-for
+with_stmt	With statement	E		4	compound/with-single,compound/with-anonymous,compound/with-multi,compound/with-parens,compound/with-parens-single,compound/async-with
+with_item	With statement	E		2	compound/with-single,compound/with-anonymous,compound/with-multi,compound/with-parens,compound/with-parens-single
+try_stmt	Try statement	E		3	compound/try-finally,compound/try-except-else,compound/except-as,compound/except-star
+except_block	Except statement	E		4	compound/try-except-else,compound/except-as,compound/except-bare,compound/except-tuple,compound/except-exprs
+except_star_block	Except statement	E		3	compound/except-star,compound/except-star-as
+finally_block	Except statement	E		1	compound/try-finally,compound/except-as
+match_stmt	Match statement	E		1	match/literal
+subject_expr	Match statement	E		2	match/literal,match/subject-tuple
+case_block	Match statement	E		1	match/literal
+guard	Match statement	E		1	match/or-as-guard
+patterns	Match statement	E		2	match/literal,match/or-as-guard
+pattern	Match statement	E		2	match/literal,match/group,match/or-as-guard
+as_pattern	Match statement	E		1	match/or-as-guard
+or_pattern	Match statement	E		1	match/or-as-guard
+closed_pattern	Match statement	E		8	match/literal,match/capture,match/value,match/group,match/mapping,match/class-empty
+literal_pattern	Match statement	E		6	match/literal,match/complex-literal
+literal_expr	Match statement	E		6	match/mapping,match/mapping-value-key
+complex_number	Match statement	E		2	match/complex-literal
+signed_number	Match statement	E		2	match/literal
+signed_real_number	Match statement	E		2	match/complex-literal
+real_number	Match statement	X	仅对应 NUMBER 词法记号，无独立书写形式（词法记号不计入）	1	
+imaginary_number	Match statement	X	仅对应 NUMBER 词法记号，无独立书写形式（词法记号不计入）	1	
+capture_pattern	Match statement	E		1	match/capture
+pattern_capture_target	Match statement	E		1	match/capture,match/sequence-star
+wildcard_pattern	Match statement	E		1	match/wildcard,match/sequence-star
+value_pattern	Match statement	E		1	match/value
+attr	Match statement	E		1	match/value,match/mapping-value-key
+name_or_attr	Match statement	E		2	match/value,match/class-empty
+group_pattern	Match statement	E		1	match/group
+sequence_pattern	Match statement	E		2	match/capture,match/sequence-tuple
+open_sequence_pattern	Match statement	E		1	match/open-sequence
+maybe_sequence_pattern	Match statement	E		1	match/capture,match/sequence-tuple,match/open-sequence
+maybe_star_pattern	Match statement	E		2	match/capture,match/sequence-star,match/open-sequence
+star_pattern	Match statement	E		2	match/sequence-star
+mapping_pattern	Match statement	E		4	match/mapping
+items_pattern	Match statement	E		1	match/mapping
+key_value_pattern	Match statement	E		1	match/mapping,match/mapping-value-key
+double_star_pattern	Match statement	E		1	match/mapping
+class_pattern	Match statement	E		4	match/class-empty,match/class-positional,match/class-keyword
+positional_patterns	Match statement	E		1	match/class-positional
+keyword_patterns	Match statement	E		1	match/class-keyword
+keyword_pattern	Match statement	E		1	match/class-keyword
+type_alias	Type statement	E		1	type/alias,type/alias-params,type/alias-starred-default
+type_params	Type parameter declaration	E		1	type/alias-params,type/params-simple,type/class-params,type/alias-starred-default
+type_param_seq	Type parameter declaration	E		1	type/alias-params,type/params-simple
+type_param	Type parameter declaration	E		3	type/alias-params,type/params-simple,type/params-bounds,type/class-params,type/alias-starred-default
+type_param_bound	Type parameter declaration	E		1	type/params-bounds,type/class-params
+type_param_default	Type parameter declaration	E		1	type/alias-starred-default
+type_param_starred_default	Type parameter declaration	E		1	type/alias-starred-default
+expressions	EXPRESSIONS	E		3	compound/except-tuple,compound/except-exprs,compound/except-star,expr/star-expressions
+expression	EXPRESSIONS	E		3	type/alias,compound/if,compound/except-tuple,compound/except-exprs,function/return-annotation,lambda/basic,expr/conditional,expr/yield-exprs
+yield_expr	EXPRESSIONS	E		2	assign/annotated-yield,stmt/yield,expr/yield-exprs,expr/group-yield
+star_expressions	EXPRESSIONS	E		3	module/expression-statement,stmt/return,stmt/yield,compound/for-else,expr/star-expressions
+star_expression	EXPRESSIONS	E		2	module/expression-statement,expr/star-expressions
+star_named_expressions	EXPRESSIONS	E		1	match/subject-tuple,expr/star-expressions,expr/list,expr/tuple
+star_named_expression	EXPRESSIONS	E		2	match/subject-tuple,expr/star-expressions,expr/list,expr/tuple
+assignment_expression	EXPRESSIONS	E		1	expr/namedexpr
+named_expression	EXPRESSIONS	E		2	compound/if,expr/namedexpr,expr/slices,expr/group,expr/listcomp,expr/listcomp-multi-if,expr/genexp
+disjunction	EXPRESSIONS	E		2	expr/conditional,expr/bool-ops,expr/listcomp,expr/listcomp-multi-if
+conjunction	EXPRESSIONS	E		2	expr/bool-ops
+inversion	EXPRESSIONS	E		2	expr/bool-ops
+comparison	Comparison operators	E		2	expr/comparison
+compare_op_bitwise_or_pair	Comparison operators	E		10	expr/comparison
+eq_bitwise_or	Comparison operators	E		1	expr/comparison
+noteq_bitwise_or	Comparison operators	E		1	expr/comparison
+lte_bitwise_or	Comparison operators	E		1	expr/comparison
+lt_bitwise_or	Comparison operators	E		1	expr/comparison
+gte_bitwise_or	Comparison operators	E		1	expr/comparison
+gt_bitwise_or	Comparison operators	E		1	expr/comparison
+notin_bitwise_or	Comparison operators	E		1	expr/comparison
+in_bitwise_or	Comparison operators	E		1	expr/comparison
+isnot_bitwise_or	Comparison operators	E		1	expr/comparison
+is_bitwise_or	Comparison operators	E		1	expr/comparison
+bitwise_or	Bitwise operators	E		2	expr/bitwise
+bitwise_xor	Bitwise operators	E		2	expr/bitwise
+bitwise_and	Bitwise operators	E		2	expr/bitwise
+shift_expr	Bitwise operators	E		3	expr/shift
+sum	Arithmetic operators	E		3	expr/sum
+term	Arithmetic operators	E		6	expr/term,expr/matmul
+factor	Arithmetic operators	E		4	expr/factor
+power	Arithmetic operators	E		2	expr/power
+await_primary	Primary elements	E		2	function/async
+primary	Primary elements	E		5	function/async,expr/primary
+slices	Primary elements	E		2	expr/slices,expr/slice-tuple,expr/starred-slice
+slice	Primary elements	E		2	expr/slices,expr/slice-tuple
+atom	Primary elements	E		10	module/expression-statement,expr/numbers-integer,expr/numbers-underscore,expr/numbers-octal,expr/numbers-float,expr/numbers-complex,expr/constants,expr/primary,expr/ellipsis,expr/ellipsis-tuple,expr/ellipsis-default
+group	Primary elements	E		1	expr/group,expr/group-yield
+lambdef	Lambda functions	E		1	lambda/basic
+lambda_params	Lambda functions	E		1	lambda/basic
+lambda_parameters	Lambda functions	E		5	lambda/basic,lambda/slash
+lambda_slash_no_default	Lambda functions	E		2	lambda/slash
+lambda_slash_with_default	Lambda functions	E		2	lambda/slash
+lambda_star_etc	Lambda functions	E		3	lambda/star
+lambda_kwds	Lambda functions	E		1	lambda/star
+lambda_param_no_default	Lambda functions	E		2	lambda/basic,lambda/star
+lambda_param_with_default	Lambda functions	E		2	lambda/basic
+lambda_param_maybe_default	Lambda functions	E		2	lambda/basic
+lambda_param	Lambda functions	X	仅对应 NAME 词法记号，无独立书写形式（词法记号不计入）	1	
+fstring_middle	LITERALS	E		2	expr/fstring
+fstring_replacement_field	LITERALS	E		1	expr/fstring,expr/fstring-nested-spec
+fstring_conversion	LITERALS	E		1	expr/fstring
+fstring_full_format_spec	LITERALS	E		1	expr/fstring-format
+fstring_format_spec	LITERALS	E		2	expr/fstring-format,expr/fstring-nested-spec
+fstring	LITERALS	E		1	expr/string-concat,expr/fstring
+tstring_format_spec_replacement_field	LITERALS	E		1	expr/tstring
+tstring_format_spec	LITERALS	E		2	expr/tstring
+tstring_full_format_spec	LITERALS	E		1	expr/tstring
+tstring_replacement_field	LITERALS	E		1	expr/tstring
+tstring_middle	LITERALS	E		2	expr/tstring
+tstring	LITERALS	E		1	expr/tstring
+string	LITERALS	X	仅对应 STRING 词法记号，无独立书写形式（词法记号不计入）	1	
+strings	LITERALS	E		2	module/expression-statement,expr/constants,expr/string-concat
+list	LITERALS	E		1	expr/list
+tuple	LITERALS	E		1	expr/ellipsis-tuple,expr/tuple
+set	LITERALS	E		1	expr/set
+dict	Dicts	E		1	expr/dict
+double_starred_kvpairs	Dicts	E		1	expr/dict
+double_starred_kvpair	Dicts	E		2	expr/dict
+kvpair	Dicts	E		1	expr/dict,expr/dictcomp
+for_if_clauses	Comprehensions & Generators	E		1	expr/listcomp,expr/listcomp-multi-if,expr/setcomp,expr/dictcomp,expr/genexp,expr/comprehension-nested
+for_if_clause	Comprehensions & Generators	E		2	expr/listcomp,expr/listcomp-multi-if,expr/comprehension-nested,expr/comprehension-async
+listcomp	Comprehensions & Generators	E		1	expr/listcomp,expr/listcomp-multi-if,expr/comprehension-async
+setcomp	Comprehensions & Generators	E		1	expr/setcomp,expr/comprehension-async
+genexp	Comprehensions & Generators	E		1	expr/genexp
+dictcomp	Comprehensions & Generators	E		1	expr/dictcomp,expr/comprehension-async
+arguments	FUNCTION CALL ARGUMENTS	E		1	expr/call-positional,expr/call-starred
+args	FUNCTION CALL ARGUMENTS	E		2	expr/call-positional
+kwargs	FUNCTION CALL ARGUMENTS	E		3	expr/call-starred
+starred_expression	FUNCTION CALL ARGUMENTS	E		1	expr/starred-slice,expr/call-starred
+kwarg_or_starred	FUNCTION CALL ARGUMENTS	E		2	expr/call-positional
+kwarg_or_double_starred	FUNCTION CALL ARGUMENTS	E		2	expr/call-starred
+star_targets	Generic targets	E		2	assign/chain,assign/attributes,assign/tuple-target,assign/star,assign/list-target,assign/nested-unpack,compound/for-else,expr/target-attribute,expr/target-tuple-of-attributes
+star_targets_list_seq	Generic targets	E		1	assign/list-target
+star_targets_tuple_seq	Generic targets	E		2	assign/tuple-target,assign/nested-unpack,expr/target-tuple-of-attributes
+star_target	Generic targets	E		2	assign/chain,assign/attributes,assign/tuple-target,assign/star,assign/list-target,assign/nested-unpack,compound/with-single,expr/target-attribute,expr/target-tuple-of-attributes
+target_with_star_atom	Generic targets	E		3	assign/chain,assign/attributes,expr/target-attribute,expr/target-subscript,expr/target-tuple-of-attributes
+star_atom	Generic targets	E		4	assign/chain,assign/attributes,assign/tuple-target,assign/list-target,assign/nested-unpack,compound/with-single,expr/target-tuple-of-attributes
+single_target	Generic targets	E		3	assign/annotated-target,assign/annotated-paren,class/methods
+single_subscript_attribute_target	Generic targets	E		2	assign/annotated-target,class/methods
+t_primary	Generic targets	E		5	assign/attributes,assign/annotated-target,class/methods,expr/target-attribute,expr/target-subscript,expr/target-tuple-of-attributes
+t_lookahead	Generic targets	X	仅用于正向前瞻判断，无独立书写形式	3	
+del_targets	Targets for del statements	E		1	stmt/del,expr/del-nested,expr/del-tuple,expr/del-list
+del_target	Targets for del statements	E		3	stmt/del,expr/del-nested
+del_t_atom	Targets for del statements	E		4	stmt/del,expr/del-nested,expr/del-tuple,expr/del-list
+type_expressions	TYPING ELEMENTS	X	仅被 func_type 入口引用，模块源码不可达	7	
+func_type_comment	TYPING ELEMENTS	E		2	function/type-comment

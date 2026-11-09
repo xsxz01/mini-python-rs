@@ -10,6 +10,7 @@
 // 3. value 句柄遵循"持有一次引用"语义, 由 value 的拷贝构造/析构自动维护。
 //    Value handles own exactly one reference via value copy semantics.
 #include "minipy.h"
+#include "cffi.hpp"
 
 #include <cstddef>
 #include <cstdlib>
@@ -36,6 +37,7 @@ struct VmBox{
     std::string lastError;
     std::string exceptionType;
     std::string typeName;
+    std::string scratch;   // 通用字符串暂存 (const char* 返回值)
 };
 
 // 值句柄: 持有一个 value (自动引用计数)
@@ -123,6 +125,20 @@ char* duplicateText(const std::string& text){
     return out;
 }
 
+// 把字符串列表转成 char** (调用方用 mp_free_names 释放)
+int allocateNames(const std::vector<std::string>& collected, char*** names, size_t* count){
+    if (!names || !count) return MP_ERROR;
+    *names = nullptr;
+    *count = 0;
+    size_t total = collected.size();
+    auto** list = static_cast<char**>(std::calloc(total ? total : 1, sizeof(char*)));
+    if (!list) return MP_ERROR;
+    for (size_t i = 0; i < total; ++i) list[i] = duplicateText(collected[i]);
+    *names = list;
+    *count = total;
+    return MP_OK;
+}
+
 // 在 vm 内执行并捕获 C++ 异常
 template <typename Fn>
 bool guardRun(vm* engine, Fn&& fn){
@@ -158,13 +174,23 @@ int kindOf(const value& v){
     if (t == "int" || t == "bool") return MP_KIND_INT;
     if (t == "float") return MP_KIND_FLOAT;
     if (t == "str") return MP_KIND_STR;
+    if (t == "bytes" || t == "bytearray") return MP_KIND_BYTES;
     if (t == "list") return MP_KIND_LIST;
     if (t == "tuple") return MP_KIND_TUPLE;
     if (t == "dict" || t == "dict_keys" || t == "dict_values" || t == "dict_items")
         return MP_KIND_DICT;
     if (t == "range") return MP_KIND_RANGE;
     if (t == "object" || t == "class" || t == "super") return MP_KIND_OBJECT;
-    if (t == "native_object") return MP_KIND_NATIVE;
+    if (t == "native_object"){
+        if (v.ptr){
+            auto* inst = static_cast<ffi_instance*>(v.ptr);
+            if (inst->typeName == "complex" ||
+                (inst->klass && inst->klass->name == "complex"))
+                return MP_KIND_COMPLEX;
+            if (inst->typeName == "exception") return MP_KIND_EXCEPTION;
+        }
+        return MP_KIND_NATIVE;
+    }
     if (t == "function" || t == "bound_function" || t == "native_method") return MP_KIND_FUNC;
     if (t == "module") return MP_KIND_MODULE;
     return MP_KIND_OTHER;
@@ -510,6 +536,10 @@ void mp_vm_free(void* handle){
         return;
     }
     try{
+        minipyCleanupAtexit(*box->engine);
+        minipyCleanupContextvars(*box->engine);
+        minipyCleanupWarnings(*box->engine);
+        minipyCleanupLogging(*box->engine);
         delete box->engine;
     } catch (...){}
     delete box;
@@ -605,6 +635,13 @@ int mp_vm_run(void* handle){
         engine->run();
     });
     if (ok && engine->hasError()) ok = false;
+    if (ok){
+        // 解释器退出: 执行 atexit 注册的回调 (输出在 OK 之前)
+        // Interpreter exit: run atexit callbacks (output stays before OK)
+        // ᠭᠠᠷᠤᠯᠳᠤ atexit ᠠᠶᠢᠯᠳᠠᠭᠤᠯᠬᠤ
+        minipyRunAtexit(*engine);
+        if (engine->hasError()) engine->clearErr();
+    }
     return finish(engine, ok);
 }
 
@@ -719,20 +756,98 @@ int mp_vm_global_names(void* handle, char*** names, size_t* count){
         collected = engine->collectScopeNames();
     });
     if (!ok) return MP_ERROR;
-
-    size_t total = collected.size();
-    auto** list = static_cast<char**>(std::calloc(total ? total : 1, sizeof(char*)));
-    if (!list) return MP_ERROR;
-    for (size_t i = 0; i < total; ++i) list[i] = duplicateText(collected[i]);
-    *names = list;
-    *count = total;
-    return MP_OK;
+    return allocateNames(collected, names, count);
 }
 
 void mp_free_names(char** names, size_t count){
     if (!names) return;
     for (size_t i = 0; i < count; ++i) std::free(names[i]);
     std::free(names);
+}
+
+// ---- 反射 / Introspection ----
+int mp_vm_find_class(void* handle, const char* name, void** out){
+    if (!out) return MP_ERROR;
+    *out = nullptr;
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return MP_ERROR;
+    std::string wanted = safeText(name);
+
+    // 优先从运行时全局作用域取 (脚本执行后定义的类)
+    value* found = engine->findVariablePtr(wanted);
+    if (found && found->type == "class" && found->ptr){
+        *out = wrapValue(engine, *found);
+        return MP_OK;
+    }
+    // 兼容已编译但未执行的脚本
+    for (auto& entry : engine->script.classes){
+        if (entry.name == wanted){
+            // 脚本类由 script_t 持有, 这里只返回一个非持有句柄
+            *out = wrapValue(engine, value("class", &entry, nullptr));
+            return MP_OK;
+        }
+    }
+    return MP_NOT_FOUND;
+}
+
+int mp_vm_find_function(void* handle, const char* name, void** out){
+    if (!out) return MP_ERROR;
+    *out = nullptr;
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return MP_ERROR;
+    std::string wanted = safeText(name);
+
+    value* found = engine->findVariablePtr(wanted);
+    if (found && found->type == "function" && found->ptr){
+        *out = wrapValue(engine, *found);
+        return MP_OK;
+    }
+    for (auto& entry : engine->script.functions){
+        if (entry.name == wanted){
+            *out = wrapValue(engine, value("function", &entry, nullptr));
+            return MP_OK;
+        }
+    }
+    return MP_NOT_FOUND;
+}
+
+int mp_vm_has_lib(void* handle, const char* name){
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return 0;
+    std::string wanted = safeText(name);
+    if (engine->findCffiLibrary(wanted)) return 1;
+    return engine->findScriptLibrary(wanted) ? 1 : 0;
+}
+
+int mp_vm_heap_count(void* handle, long long* out_count){
+    if (!out_count) return MP_ERROR;
+    *out_count = 0;
+    vm* engine = engineOf(handle);
+    if (!engine) return MP_ERROR;
+    *out_count = engine->heapObjectCount();
+    return MP_OK;
+}
+
+int mp_vm_heap_snapshot(void* handle, void*** out, size_t* out_count){
+    if (!out || !out_count) return MP_ERROR;
+    *out = nullptr;
+    *out_count = 0;
+    vm* engine = engineOf(handle);
+    if (!engine) return MP_ERROR;
+
+    std::vector<value> items;
+    bool ok = guardRun(engine, [&]{
+        items = engine->heapSnapshot();
+    });
+    if (!ok) return MP_ERROR;
+
+    size_t total = items.size();
+    auto** list = static_cast<void**>(std::calloc(total ? total : 1, sizeof(void*)));
+    if (!list) return MP_ERROR;
+    for (size_t i = 0; i < total; ++i) list[i] = wrapValue(engine, items[i]);
+    *out = list;
+    *out_count = total;
+    return MP_OK;
 }
 
 // ================= 2. 构造值 / Value builders =================
@@ -787,6 +902,106 @@ void* mp_range(void* handle, long long start, long long stop, long long step){
     if (!engine) return nullptr;
     if (step == 0) step = 1;
     return wrapValue(engine, engine->makeRange(start, stop, step));
+}
+
+void* mp_dict_items(void* handle, void** keys, void** values, size_t count){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    std::vector<std::pair<value, value>> items;
+    items.reserve(count);
+    for (size_t i = 0; i < count; ++i){
+        value k = (keys && keys[i]) ? valueOf(keys[i]) : engine->makeNone();
+        value v = (values && values[i]) ? valueOf(values[i]) : engine->makeNone();
+        items.emplace_back(std::move(k), std::move(v));
+    }
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeDict(items);
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_dict_view(void* handle, void* dict, int kind){
+    vm* engine = engineOf(handle);
+    if (!engine || kind < 0 || kind > 2) return nullptr;
+    value target = valueOf(dict);
+    if (!dictStorage(target)) return nullptr;
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeDictView(target, kind);
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_complex(void* handle, double real, double imag){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeComplex(real, imag);
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_exception(void* handle, const char* type, const char* message){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeExceptionObject(safeText(type), safeText(message), value());
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_super(void* handle, void* klass, void* obj){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value klassVal = klass ? valueOf(klass) : value();
+    value objVal = obj ? valueOf(obj) : value();
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeSuper(klass ? &klassVal : nullptr,
+                                   obj ? &objVal : nullptr);
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_make_object(void* handle, void* klass){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value classValue = valueOf(klass);
+    if (classValue.type != "class" || !classValue.ptr) return nullptr;
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeObject(static_cast<class_t*>(classValue.ptr));
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_create_class(void* handle, const char* name, void** bases,
+                      size_t base_count, void* namespace_dict){
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return nullptr;
+    std::vector<value> baseValues = collectArgs(bases, base_count);
+    value namespaceValue = valueOf(namespace_dict);
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->createDynamicClass(safeText(name), baseValues, namespaceValue);
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_bind_method(void* handle, void* obj, const char* name){
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return nullptr;
+    value target = valueOf(obj);
+    function_t* method = engine->findObjectMethod(target, name);
+    if (!method) return nullptr;
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->makeBoundFunction(method, target);
+    });
+    return wrapValue(engine, result);
 }
 
 // ---- 容器原地修改 / In-place container mutation ----
@@ -880,6 +1095,23 @@ int mp_dict_del(void* dict, void* key){
     return engine->dictRemove(target, valueOf(key)) ? MP_OK : MP_NOT_FOUND;
 }
 
+int mp_dict_get_index(void* dict, size_t index, void** out_key, void** out_value){
+    if (!out_key && !out_value) return MP_ERROR;
+    if (out_key) *out_key = nullptr;
+    if (out_value) *out_value = nullptr;
+    value target = valueOf(dict);
+    dict_t* storage = dictStorage(target);
+    if (!storage) return MP_TYPE_ERROR;
+    ValueBox* box = valueBox(dict);
+    vm* engine = box ? box->owner : nullptr;
+    if (!engine) return MP_ERROR;
+    if (index >= storage->size()) return MP_NOT_FOUND;
+    auto& pair = (*storage)[index];
+    if (out_key) *out_key = wrapValue(engine, pair.first);
+    if (out_value) *out_value = wrapValue(engine, pair.second);
+    return MP_OK;
+}
+
 // ---- 引用计数 / Refcount ----
 void* mp_value_retain(void* value){
     ValueBox* box = valueBox(value);
@@ -938,6 +1170,72 @@ const char* mp_value_as_str_n(void* value, size_t* out_len){
     auto* text = static_cast<std::string*>(box->v.ptr);
     if (out_len) *out_len = text->size();
     return text->c_str();
+}
+
+int mp_value_is_complex(void* value){
+    ValueBox* box = valueBox(value);
+    if (!box) return 0;
+    return isComplexValueEx(box->v) ? 1 : 0;
+}
+
+int mp_value_as_complex(void* value, double* real, double* imag){
+    if (real) *real = 0.0;
+    if (imag) *imag = 0.0;
+    ValueBox* box = valueBox(value);
+    if (!box || !isComplexValueEx(box->v)) return 0;
+    double re = 0.0, im = 0.0;
+    if (!complexPartsEx(box->v, re, im)) return 0;
+    if (real) *real = re;
+    if (imag) *imag = im;
+    return 1;
+}
+
+const char* mp_value_as_bytes(void* value, size_t* out_len){
+    if (out_len) *out_len = 0;
+    ValueBox* box = valueBox(value);
+    if (!box || (box->v.type != "bytes" && box->v.type != "bytearray") || !box->v.ptr)
+        return nullptr;
+    auto* text = static_cast<std::string*>(box->v.ptr);
+    if (out_len) *out_len = text->size();
+    return text->c_str();
+}
+
+void* mp_value_class(void* val){
+    ValueBox* box = valueBox(val);
+    if (!box || !box->owner) return nullptr;
+    if (box->v.type == "class" && box->v.ptr)
+        return wrapValue(box->owner, value("class", box->v.ptr, nullptr));
+    class_t* klass = box->owner->getClassOfScriptObject(box->v);
+    if (klass) return wrapValue(box->owner, value("class", klass, nullptr));
+
+    // 内置值: 回退到对应的内置类型对象 (native_object)
+    std::string typeName = box->owner->pythonTypeName(box->v);
+    value typeObj = box->owner->getBuiltinTypeObj(typeName);
+    if (typeObj.type == "none" || !typeObj.ptr) return nullptr;
+    return wrapValue(box->owner, typeObj);
+}
+
+int mp_value_dir_names(void* value, char*** names, size_t* count){
+    if (!names || !count) return MP_ERROR;
+    *names = nullptr;
+    *count = 0;
+    ValueBox* box = valueBox(value);
+    if (!box || !box->owner) return MP_ERROR;
+    vm* engine = box->owner;
+    std::vector<std::string> collected;
+    bool ok = guardRun(engine, [&]{
+        collected = engine->collectDirNames(box->v);
+    });
+    if (!ok) return MP_ERROR;
+    return allocateNames(collected, names, count);
+}
+
+void* mp_value_container(void* val){
+    ValueBox* box = valueBox(val);
+    if (!box || !box->owner) return nullptr;
+    value result = box->owner->containerOf(box->v);
+    if (result.type == "none" || !result.ptr) return nullptr;
+    return wrapValue(box->owner, result);
 }
 
 int mp_value_equal(void* a, void* b){
@@ -1228,6 +1526,96 @@ void* mp_builtin_type(void* handle, const char* type_name){
     });
     if (result.type == "none") return nullptr;
     return wrapValue(engine, result);
+}
+
+void* mp_call_method(void* handle, void* obj, const char* name, void** args, size_t argc){
+    vm* engine = engineOf(handle);
+    if (!engine || !name) return nullptr;
+    value target = valueOf(obj);
+    value callable = engine->makeNone();
+    bool ok = guardRun(engine, [&]{
+        function_t* method = engine->findObjectMethod(target, name);
+        if (method) callable = engine->makeBoundFunction(method, target);
+        else callable = engine->getAttribute(target, safeText(name));
+    });
+    if (!ok || engine->hasError()) return nullptr;
+
+    std::vector<value> positional = collectArgs(args, argc);
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = callWithKeywords(engine, callable, positional, {});
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_apply_format(void* handle, void* val, const char* spec){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value source = valueOf(val);
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->applyFormat(source, safeText(spec));
+    });
+    return wrapValue(engine, result);
+}
+
+void* mp_percent_format(void* handle, void* format, void* arg){
+    vm* engine = engineOf(handle);
+    if (!engine) return nullptr;
+    value fmt = valueOf(format);
+    value argument = valueOf(arg);
+    value result = engine->makeNone();
+    guardRun(engine, [&]{
+        result = engine->percentFormat(fmt, argument);
+    });
+    return wrapValue(engine, result);
+}
+
+int mp_is_subclass_of(void* handle, void* sub, const char* builtin_name){
+    vm* engine = engineOf(handle);
+    if (!engine || !builtin_name) return 0;
+    value subValue = valueOf(sub);
+    bool matched = false;
+    guardRun(engine, [&]{
+        matched = engine->isSubclassOfBuiltin(subValue, safeText(builtin_name));
+    });
+    return matched ? 1 : 0;
+}
+
+const char* mp_builtin_base_name(void* handle, void* klass){
+    vm* engine = engineOf(handle);
+    VmBox* box = vmBox(handle);
+    if (!engine || !box) return "";
+    value classValue = valueOf(klass);
+    if (classValue.type != "class" || !classValue.ptr) return "";
+    std::string name;
+    guardRun(engine, [&]{
+        name = engine->builtinBaseName(static_cast<class_t*>(classValue.ptr));
+    });
+    box->scratch = std::move(name);
+    return box->scratch.c_str();
+}
+
+int mp_match_pattern(void* handle, void* subject, const char* pattern,
+                     void** captures_out){
+    if (captures_out) *captures_out = nullptr;
+    vm* engine = engineOf(handle);
+    if (!engine || !pattern) return MP_ERROR;
+
+    std::vector<std::pair<std::string, value>> captures;
+    bool matched = false;
+    bool ok = guardRun(engine, [&]{
+        matched = engine->matchPattern(valueOf(subject), safeText(pattern), captures);
+    });
+    if (!ok) return MP_ERROR;
+    if (matched && captures_out){
+        std::vector<std::pair<value, value>> items;
+        items.reserve(captures.size());
+        for (auto& entry : captures)
+            items.emplace_back(engine->makeString(entry.first), entry.second);
+        *captures_out = wrapValue(engine, engine->makeDict(items));
+    }
+    return matched ? 1 : 0;
 }
 
 // ================= 5. 扩展注册 / Extension (FFI) =================

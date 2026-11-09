@@ -326,6 +326,11 @@ public:
 // FFI ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠢ ᠣᠷᠣᠭᠤᠯᠬᠤ
     void loadlib(const ffilib& library);
 
+// 按模块名查找已装载的 FFI 库 (未找到返回 nullptr)
+// Find a loaded FFI library by module name (nullptr if absent)
+// ᠨᠡᠷᠡ ᠪᠡᠷ FFI ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠬᠠᠭᠤᠴᠠᠯᠳᠤ
+    ffilib* findCffiLibrary(const std::string& name);
+
 // 一次性加载全部内置标准库 (builtins / math / os / json ...)
 // Load all builtin stdlib at once (builtins, math, os, json ...)
 // ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠭ᠎ᠠ ᠪᠢᠲ᠋ᠢ ᠳ᠋ᠦᠩᠳ ᠢ ᠪᠡᠷᠢᠨ᠎ᠠ
@@ -523,11 +528,21 @@ public:
 // FFI ᠶᠢᠨᠢᠰ value ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
     value makeNativeObject(const ffilib* library, const ffi_class* klass, void* handle);
 
+// 构造一个复数 value (real + imag*1j)
+// Build a complex value (real + imag*1j)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ value ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
+    value makeComplex(double real, double imag);
+
 // 构造一个动态对象 (由 getter / caller 回调提供属性和调用)
 // Build a dynamic object (property + callable via callbacks)
 // ᠳ᠋ᠶᠨᠠᠮᠢᠭ ᠪᠣᠯᠭᠠᠨ᠎ᠠ ᠪᠢᠶᠡ
     value makeDynamicObject(const std::string& typeName, void* handle,
                               dynamic_get getter, dynamic_call caller);
+
+// 供 types.new_class 使用: 初始化并托管一个 class_t, 返回 class value
+// For types.new_class: initialize + adopt a class_t, return class value
+// types.new_class ᠳ᠋ᠦ ᠵᠣᠷᠢᠭᠤᠯᠤᠭᠰᠠᠨ ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠬᠢᠵᠦ ᠠᠪᠬᠤ
+    value adoptClass(class_t* klass);
 
 // 构造一个异常对象
 // Build an exception object
@@ -544,6 +559,16 @@ public:
 // Get the script class of a script object
 // script object ᠶᠢᠨ ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ
     class_t* getClassOfScriptObject(const value& obj);
+
+// 堆对象数量 (只读统计, 供 gc 模块)
+// Number of heap objects (read-only stats, used by gc)
+// ᠭᠡᠷ ᠲᠤ ᠪᠠᠶᠢᠨᠠᠳ᠋ᠣᠭᠰᠣᠨ ᠲᠣᠭ᠎ᠠ
+    long long heapObjectCount() const;
+
+// 堆对象快照 (供 gc.get_objects 只读枚举)
+// Snapshot of heap objects (read-only, used by gc.get_objects)
+// ᠭᠡᠷ ᠲᠤ ᠪᠠᠶᠢᠨᠠᠳ᠋ᠣᠭᠰᠣᠨ ᠭᠠᠷᠴᠠᠭ
+    std::vector<value> heapSnapshot();
 
 // 取得最后一次错误字符串
 // Get the last error string
@@ -798,6 +823,11 @@ private:
 // script ᠶᠢᠨ ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠡᠴᠡ ᠬᠠᠯᠠᠬᠤ
     class_t* findClass(const std::string& name);
 
+// 查找某个函数/方法所属的脚本 (主脚本或已注册的脚本库)
+// Find the script that owns a function/method (main script or registered library)
+// ᠶᠢᠳᠡ ᠶᠢᠨ ᠠᠷᠭᠠ ᠶᠢᠨ ᠪᠢᠴᠢᠭᠵᠢᠯᠳᠡᠨ᠎ᠡ ᠢ ᠬᠠᠯᠠᠬᠤ
+    const script_t* findFunctionOwner(const function_t* fn) const;
+
 // 解析类的基类 (把 name/Bases 里的 string 变成实际 class_t*)
 // Resolve a class's base-class string names into class_t*
 // ᠬᠢᠶ᠎ᠡ ᠪᠢᠲ᠋ᠢ ᠶᠢᠨ ᠡᠪᠦᠭ ᠢ ᠪᠠᠶᠢᠨᠳᠠᠭᠤᠯᠬᠤ
@@ -896,6 +926,14 @@ public:
 // refcount -1
     void releaseValue(void* pointer);
 
+// 查询堆对象当前引用计数 (不存在返回 0)
+// Query current heap-object refcount (0 if unknown)
+// refcount ᠬᠠᠯᠠᠬᠤ
+    long long refCountOf(void* pointer) const {
+        auto it = refCounts.find(pointer);
+        return it != refCounts.end() ? it->second : 0;
+    }
+
 // ---- private 成员变量 ----
 private:
 // 作用域栈, scopes.back() 是当前作用域
@@ -961,6 +999,17 @@ private:
 
 
 std::string pythonRepr(vm& vm, const value& v);
+
+// 判定/读取复数 (cmath 等模块使用)
+// Complex predicate/parts accessors (used by cmath etc.)
+// ᠰᠢᠯᠢ ᠲᠣ᠎ ᠶᠢᠨ ᠰᠢᠯᠲᠡ ᠬᠠᠯᠠᠬᠤ
+bool isComplexValueEx(const value& v);
+bool complexPartsEx(const value& v, double& real, double& imag);
+
+// 提取闭包底层函数 (types.new_class 等方法使用)
+// Extract underlying function from a closure value (used by types.new_class etc.)
+// ᠬᠠᠭᠳᠠᠯᠲᠠ ᠶᠢᠨ ᠦᠨᠳᠦᠰᠦᠨ ᠦᠢᠯᠡᠳᠦᠯ
+bool closureFunctionCopy(const value& v, function_t& out);
 
 }
 
